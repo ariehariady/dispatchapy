@@ -97,7 +97,7 @@ Dispatchapy runs on two main background processes (workers):
 
 ## 💡 Potential Usage
 
-While originally conceived for WhatsApp, Dispatchapy is a generic API dispatcher and can be used to add resilience and a unified interface to any API that accepts a `POST` request.
+While I developed this originally for managing notification services for my projects, Dispatchapy is a generic API dispatcher and can be used to add resilience and a unified interface to any API that accepts a `POST` request.
 
 - **SMS Gateways:** Twilio, Vonage, etc.
 - **Transactional Email Services:** SendGrid, Mailgun, Postmark.
