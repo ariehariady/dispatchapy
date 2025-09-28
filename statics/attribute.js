@@ -7,7 +7,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const watermarkText = document.createElement('p');
     
     // UPDATED: Use innerHTML to include a clickable mailto link
-    watermarkText.innerHTML = 'Dispatchapy by <a href="mailto:ariehariady@gmail.com" class="text-blue-600 hover:underline">ariehariady</a>.';
+    watermarkText.innerHTML = 'Copyright (c) 2025 <a href="mailto:ariehariady@gmail.com" class="text-blue-600 hover:underline">ariehariady</a>.';
 
     // Append the text to the footer, and the footer to the page body
     footer.appendChild(watermarkText);
