@@ -1,6 +1,13 @@
 """
 Dispatchapy
+Copyright (c) 2025 Arie Hariady
+
+High-availability API dispatch gateway. It is designed to be a single, 
+reliable entry point for sending notifications and webhooks through multiple providers. 
+With features like automatic failover, health checks, and a full UI for configuration, 
+it ensures your critical communications are always delivered.
 """
+
 import os
 import asyncio
 import json
