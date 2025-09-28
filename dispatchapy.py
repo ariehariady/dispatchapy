@@ -746,7 +746,7 @@ async def resource_health_check_loop():
                         notification_status.append(f"email {email_sent}")
                     webhook_sent = trigger_failure_webhook(r)
                     if webhook_sent:
-                        notification_status.append(f"webhook {email_sent}")
+                        notification_status.append(f"webhook {webhook_sent}")
                     new_log.notification_status = ", ".join(notification_status)
                 db.add(new_log)
                 db.commit()
