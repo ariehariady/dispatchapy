@@ -1,0 +1,45 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="bg-white p-6 rounded-lg shadow-sm">
+    <div class="flex justify-between items-center">
+        <h2 class="text-lg font-semibold mb-4">Clients for Endpoint: {{ endpoint.path }}</h2>
+        {% if request.query_params.get('is_new') %}
+            <a href="/endpoints" class="px-4 py-2 bg-green-600 text-white rounded text-sm">Finish & Go to Endpoints &rarr;</a>
+        {% endif %}
+    </div>
+    
+    <!-- Add Client Form -->
+    <form method="post" action="/endpoints/{{ endpoint.id }}/clients/add" class="grid grid-cols-3 gap-2 mb-6 border-b pb-4">
+      <input name="name" placeholder="New Client Name (e.g., Billing Service)" class="p-2 border rounded col-span-2" required />
+      <div class="text-right"><button class="px-3 py-2 bg-blue-600 text-white rounded">Add Client & Generate Token</button></div>
+    </form>
+
+    <h3 class="font-semibold mb-2">Existing Clients</h3>
+    <table class="min-w-full text-sm">
+      <thead class="bg-gray-100">
+        <tr>
+          <th class="px-3 py-2 text-left">Name</th>
+          <th class="px-3 py-2 text-left">Token</th>
+          <th class="px-3 py-2 text-left">Created</th>
+          <th class="px-3 py-2 text-left">Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for client in clients %}
+        <tr class="border-t">
+          <td class="px-3 py-2">{{ client.name }}</td>
+          <td class="px-3 py-2 font-mono text-xs">{{ client.token }}</td>
+          <td class="px-3 py-2">{{ client.created_at.strftime('%Y-%m-%d') }}</td>
+          <td class="px-3 py-2">
+            <form method="post" action="/clients/delete/{{ client.id }}">
+                <button onclick="return confirm('Are you sure you want to delete this client? This will revoke their API access immediately.');" class="px-3 py-1 bg-red-600 text-white rounded text-xs">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="text-center p-4 text-gray-500">No clients have been created for this endpoint yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+</div>
+{% endblock %}

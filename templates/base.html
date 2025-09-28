@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width,initial-scale=1" />
+        <title>Dispatchapy Gateway</title>
+        <script src="/static/tailwindcss.js"></script>
+        <script src="/static/sortable.min.js"></script>
+        <script src="/static/attribute.js"></script>
+        <link rel="icon" href="/static/favicon.png" type="image/svg+xml">
+        <link rel="apple-touch-icon" href="/static/favicon.png">
+        <style>
+            body {
+                background-color: #f3f4f6;
+                background-image: radial-gradient(#d1d5db 1px, transparent 1px);
+                background-size: 16px 16px;
+            }
+        </style>
+    </head>
+    <body class="text-gray-800">
+        <div class="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
+        
+        <!-- Header with New Logo and Subtitle -->
+        <header class="bg-gray-800 p-4 rounded-lg shadow-lg flex items-center justify-between mb-6">
+            <div class="flex items-center space-x-3">
+                <div class="w-10 h-10 bg-white rounded-lg flex items-center justify-center flex-shrink-0">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" class="fill-current text-gray-800 transform -rotate-45 translate-x-1 -translate-y-1">
+                        <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path>
+                    </svg>
+                </div>
+                <div>
+                    <h1 class="text-xl font-bold text-white tracking-wider">Dispatchapy</h1>
+                    <p class="text-xs text-gray-400 uppercase tracking-widest">API Dispatch Gateway</p>
+                </div>
+            </div>
+            <nav id="main-nav" class="flex items-center space-x-2 text-sm font-medium">
+            <a href="/" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-gray-700 hover:text-white">Dashboard</a>
+            <a href="/tasks" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-gray-700 hover:text-white">Tasks</a>
+            <a href="/resources" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-gray-700 hover:text-white">Resources</a>
+            <a href="/endpoints" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-gray-700 hover:text-white">Endpoints</a>
+            <a href="/settings" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-gray-700 hover:text-white">Settings</a>
+            <a href="/documentation" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-gray-700 hover:text-white">API Docs</a>
+            <form action="/logout" method="post" class="inline">
+                <button type="submit" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-red-500 hover:text-white">Logout</button>
+            </form>
+            </nav>
+        </header>
+        
+        <main>
+            {% block content %}{% endblock %}
+        </main>
+        </div>
+
+        <script>
+        // --- Global JavaScript for Manual Check Button ---
+        document.addEventListener('click', async function(event) {
+            if (event.target.classList.contains('manual-check-btn')) {
+                const button = event.target;
+                const resourceId = button.dataset.rid;
+                const originalText = button.textContent;
+                button.textContent = 'Checking...';
+                button.disabled = true;
+                try {
+                    const response = await fetch(`/resources/${resourceId}/check`, { method: 'POST' });
+                    const data = await response.json();
+                    if (!response.ok) { throw new Error(data.detail || 'Check failed with no details.'); }
+                    if (data.success) { alert(`Health Check Result: HEALTHY\n\nStatus Code: ${data.status_code}\nDetails: ${data.detail}`);
+                    } else { alert(`Health Check Result: UNHEALTHY\n\nStatus Code: ${data.status_code}\nDetails: ${data.detail}`); }
+                    window.location.reload();
+                } catch (error) {
+                    alert('Manual check failed: ' + error.message);
+                    button.textContent = originalText;
+                    button.disabled = false;
+                }
+            }
+        });
+        
+        // --- JavaScript to Highlight Active Navigation Link ---
+        document.addEventListener('DOMContentLoaded', function() {
+            const navLinks = document.querySelectorAll('#main-nav .nav-link');
+            const currentPath = window.location.pathname;
+            navLinks.forEach(link => {
+                const linkPath = link.getAttribute('href');
+                let isActive = (linkPath === currentPath);
+                if (linkPath === '/documentation' && (currentPath === '/docs' || currentPath === '/redoc')) { isActive = true; }
+                if (currentPath.startsWith('/endpoints') && linkPath === '/endpoints') { isActive = true; }
+                if (currentPath.startsWith('/resources') && linkPath === '/resources') { isActive = true; }
+                if (currentPath.startsWith('/task') && linkPath === '/tasks') { isActive = true; }
+                if (isActive) {
+                    link.classList.add('bg-blue-600', 'text-white');
+                    link.classList.remove('text-gray-300', 'hover:bg-gray-700', 'hover:text-white');
+                }
+            });
+        });
+        </script>
+    </body>
+    </html>

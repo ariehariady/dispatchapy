@@ -1,0 +1,136 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="bg-white p-6 rounded shadow" x-data="{ isDevMode: {{ 'true' if endpoint.is_development_mode else 'false' }} }">
+    
+    <!-- Header Section -->
+    <div class="flex justify-between items-center mb-4 pb-4 border-b">
+        <h2 class="text-lg font-semibold">Configure Rules for: /api/{{ endpoint.path }}</h2>
+        <div class="flex items-center space-x-3">
+            <span class="text-sm font-medium text-gray-700">Development Mode</span>
+            <form action="/endpoints/{{ endpoint.id }}/toggle_dev_mode" method="post" class="inline">
+                <button type="submit" @click.prevent="$event.target.closest('form').submit()" 
+                        :class="isDevMode ? 'bg-green-500' : 'bg-gray-200'" 
+                        class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors">
+                    <span :class="isDevMode ? 'translate-x-6' : 'translate-x-1'" class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform"></span>
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Main Form for Saving Rules -->
+    <form method="post" action="/endpoints/{{ endpoint.id }}/rules">
+        <!-- NEW: Hidden input to track if this is a new endpoint workflow -->
+        {% if request.query_params.get('is_new') %}
+            <input type="hidden" name="is_new" value="true">
+        {% endif %}
+        <!-- Section 1: Parameter Mapping (Unchanged) -->
+        <div class="border p-4 rounded-lg">
+            <h3 class="font-semibold text-lg mb-3 pb-2 border-b">Parameter Mapping</h3>
+            <div class="space-y-6">
+                {% for resource in associated_resources %}
+                <div class="border p-4 rounded-md bg-gray-50">
+                    <h4 class="font-semibold text-md mb-3 text-gray-800">{{ resource.name }}</h4>
+                    <div class="space-y-3">
+                        {% if resource.required_params %}
+                            {% for key in resource.required_params %}
+                            <div class="grid grid-cols-4 gap-3 items-center">
+                                <label class="font-medium text-right pr-4 col-span-1 text-sm">{{ key }}</label>
+                                {% set existing_rule = rules_map.get(resource.id, {}).get(key) %}
+                                <div class="col-span-3 grid grid-cols-2 gap-2">
+                                    <select name="source_type_{{ resource.id }}_{{ key }}" class="p-2 border rounded text-sm">
+                                        <option value="from_source" {% if not existing_rule or existing_rule.source_type == 'from_source' %}selected{% endif %}>From Incoming Request</option>
+                                        <option value="generate_uuid" {% if existing_rule and existing_rule.source_type == 'generate_uuid' %}selected{% endif %}>Generate UUID</option>
+                                    </select>
+                                    <select name="source_value_{{ resource.id }}_{{ key }}" class="p-2 border rounded text-sm">
+                                        <option value="">-- Select Source Key --</option>
+                                        {% for source_key in endpoint.required_params %}
+                                        <option value="{{ source_key }}" {% if existing_rule and existing_rule.source_value == source_key %}selected{% endif %}>{{ source_key }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        {% else %}
+                            <p class="text-sm text-gray-600 px-3 py-2">This resource has no required parameters to map.</p>
+                        {% endif %}
+                    </div>
+                </div>
+                {% else %}
+                    <p class="text-center text-gray-500 py-8">There are no resources associated with this endpoint. Please <a href="/endpoints/edit/{{ endpoint.id }}" class="text-blue-600">edit the endpoint</a> to add resources first.</p>
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- Section 2: Development Rules -->
+        <div x-show="isDevMode" class="border p-4 rounded-lg mt-6" style="display: none;">
+            <h3 class="font-semibold text-lg mb-3 pb-2 border-b">Development Rules</h3>
+            <p class="text-sm text-gray-600 mb-3">When ON, these rules override incoming data. Rules are checked bottom-to-top; the first one that matches is applied.</p>
+            <div id="dev-rules-container" class="space-y-2"></div>
+            <div class="mt-3 pt-3 border-t">
+                <button type="button" id="add-dev-rule-btn" class="px-3 py-2 bg-gray-600 text-white rounded text-sm">+ Add Dev Rule</button>
+            </div>
+        </div>
+
+        <div class="flex justify-end items-center space-x-3 border-t pt-4 mt-6">
+            <a href="/endpoints" class="px-4 py-2 bg-gray-200 text-gray-800 rounded">Cancel</a>
+            {% if request.query_params.get('is_new') %}
+            <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded">Save and Add Clients</button>
+            {% else %}
+            <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded">Save All Rules</button>
+            {% endif %}
+
+        </div>
+    </form>
+</div>
+<script src="/static/alpine.min.js" defer></script>
+<script>
+    const devRulesContainer = document.getElementById('dev-rules-container');
+    const addDevRuleBtn = document.getElementById('add-dev-rule-btn');
+    const incomingParams = {{ endpoint.required_params | tojson | safe }};
+
+    function handleConditionChange(selectElement) {
+        const valueInput = selectElement.parentElement.querySelector('input[name="dev_condition_value"]');
+        valueInput.style.display = selectElement.value ? 'block' : 'none';
+        const equalsSpan = selectElement.parentElement.querySelector('.equals-span');
+        if (equalsSpan) equalsSpan.style.display = selectElement.value ? 'inline' : 'none';
+    }
+
+    function createDevRuleRow(rule = {}) {
+        let conditionParamOptions = '<option value="">Always Apply (Default)</option>';
+        incomingParams.forEach(p => {
+            conditionParamOptions += `<option value="${p}" ${p === rule.condition_param ? 'selected' : ''}>IF ${p}</option>`;
+        });
+        
+        let targetParamOptions = '';
+        incomingParams.forEach(p => {
+            targetParamOptions += `<option value="${p}" ${p === rule.target_param ? 'selected' : ''}>${p}</option>`;
+        });
+
+        const row = document.createElement('div');
+        row.className = 'flex items-center gap-2 p-2 bg-gray-50 rounded';
+        
+        // UPDATED: Changed the remove button style
+        row.innerHTML = `
+            <select name="dev_condition_param" class="p-2 border rounded w-1/4 text-sm" onchange="handleConditionChange(this)">${conditionParamOptions}</select>
+            <span class="text-gray-500 equals-span"></span>
+            <input name="dev_condition_value" value="${rule.condition_value || ''}" placeholder="equals to this value..." class="p-2 border rounded w-1/4 text-sm">
+            <span class="text-gray-500">THEN</span>
+            <select name="dev_target_param" class="p-2 border rounded w-1/4 text-sm">${targetParamOptions}</select>
+            <input name="dev_override_value" value="${rule.override_value || ''}" placeholder="to this new value" class="p-2 border rounded flex-grow text-sm">
+            <button type="button" class="px-3 py-2 bg-red-600 text-white rounded text-sm w-20 flex-shrink-0" onclick="this.parentElement.remove()">Remove</button>
+        `;
+        devRulesContainer.appendChild(row);
+        
+        handleConditionChange(row.querySelector('select[name=dev_condition_param]'));
+    }
+
+    addDevRuleBtn.addEventListener('click', () => createDevRuleRow());
+    
+    const existingDevRules = {{ dev_rules | tojson | safe }};
+    if (existingDevRules && existingDevRules.length > 0) {
+        existingDevRules.forEach(createDevRuleRow);
+    } else {
+        createDevRuleRow();
+    }
+</script>
+{% endblock %}

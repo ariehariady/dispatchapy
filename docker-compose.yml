@@ -1,0 +1,21 @@
+# Docker Compose file for Dispatchapy - API Dispatch Gateway
+# Version 1.0
+services:
+  gateway:
+    build: .
+    container_name: dispatchapy
+    # The port mapping. This connects your computer's port 8000 to the container's port 8000.
+    ports:
+      - "8000:8000"
+    # Defines the environment variables to be set inside the container.
+    environment:
+      # IMPORTANT: Change this to a strong, secret password for production.
+      - GATEWAY_ADMIN_PASSWORD=your_super_secret_password
+    # Defines the volumes for persistent data.
+    volumes:
+      # This links a 'data' folder on your computer to the '/app/data' folder inside the container.
+      # It ensures your SQLite database file is saved on your host machine.
+      - ./data:/app/data
+    # Restart policy. 'unless-stopped' ensures the container automatically restarts
+    # if it crashes, but not if you manually stop it.
+    restart: unless-stopped

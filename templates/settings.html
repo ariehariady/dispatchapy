@@ -1,0 +1,95 @@
+{% extends 'base.html' %}
+    {% block content %}
+    <div class="bg-white p-6 rounded shadow ">
+        <h2 class="text-lg font-semibold mb-4">Settings</h2>
+
+        <!-- Single form for all settings -->
+        <form id="settings-form" method="post" action="/settings" class="space-y-6">
+            
+            <!-- UPDATED: General & Task Settings Card -->
+            <div class="border rounded-lg">
+                <div class="p-4">
+                    <h3 class="text-md font-semibold">General & Task Execution Settings</h3>
+                    <!-- This grid creates the side-by-side layout -->
+                    <div class="mt-4 grid grid-cols-2 gap-6">
+                        <!-- Column 1: Max Failure Attempts -->
+                        <div>
+                            <label class="text-sm font-medium">Max Failure Attempts</label>
+                            <input type="number" name="max_failure_attempts" value="{{ settings.max_failure_attempts or '5' }}" class="p-2 border rounded w-full mt-1">
+                            <p class="text-xs text-gray-500 mt-1">The total number of times a task will be retried before being marked as permanently failed.</p>
+                        </div>
+                        <!-- Column 2: Random Delay -->
+                        <div>
+                            <label class="text-sm font-medium">Random Delay Between Tasks (Seconds)</label>
+                            <div class="flex items-center gap-2 mt-1">
+                                <input type="number" name="task_delay_min" value="{{ settings.task_delay_min or '1' }}" class="p-2 border rounded w-full" placeholder="Min">
+                                <span class="text-gray-500">to</span>
+                                <input type="number" name="task_delay_max" value="{{ settings.task_delay_max or '5' }}" class="p-2 border rounded w-full" placeholder="Max">
+                            </div>
+                            <p class="text-xs text-gray-500 mt-1">The worker will wait for a random duration within this range before processing each task.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SMTP Settings Card (Unchanged) -->
+            <div class="border rounded-lg">
+                <div class="p-4">
+                    <h3 class="text-md font-semibold">SMTP Configuration</h3>
+                    <p class="text-sm text-gray-600 mt-1 mb-4">Configure the server for sending health check failure notifications.</p>
+                    <div class="grid grid-cols-1 gap-4">
+                        <div>
+                            <label class="text-sm font-medium">Encryption Type</label>
+                            <div class="flex items-center space-x-4 mt-1">
+                                <label class="flex items-center"><input type="radio" id="enc-starttls" name="smtp_encryption" value="starttls" {% if settings.smtp_encryption == 'starttls' or not settings.smtp_encryption %}checked{% endif %} class="mr-2"> STARTTLS (Port 587)</label>
+                                <label class="flex items-center"><input type="radio" id="enc-ssl-tls" name="smtp_encryption" value="ssl_tls" {% if settings.smtp_encryption == 'ssl_tls' %}checked{% endif %} class="mr-2"> SSL/TLS (Port 465)</label>
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div><label class="text-sm font-medium">SMTP Server</label><input name="smtp_server" value="{{ settings.smtp_server or '' }}" placeholder="smtp.example.com" class="p-2 border rounded w-full mt-1"></div>
+                            <div><label class="text-sm font-medium">SMTP Port</label><input type="number" id="smtp-port-input" name="smtp_port" value="{{ settings.smtp_port or '587' }}" class="p-2 border rounded w-full mt-1"></div>
+                        </div>
+                        <div><label class="text-sm font-medium">SMTP Username</label><input name="smtp_username" value="{{ settings.smtp_username or '' }}" placeholder="your_email@example.com" class="p-2 border rounded w-full mt-1"></div>
+                        <div><label class="text-sm font-medium">SMTP Password</label><input type="password" name="smtp_password" value="{{ settings.smtp_password or '' }}" placeholder="Use an App Password" class="p-2 border rounded w-full mt-1"></div>
+                        <div><label class="text-sm font-medium">"From" Email Address</label><input name="email_from" value="{{ settings.email_from or '' }}" placeholder="gateway-alerts@example.com" class="p-2 border rounded w-full mt-1"></div>
+                    </div>
+                </div>
+                <div class="bg-gray-50 px-4 py-3 border-t flex items-center justify-between">
+                    <button type="button" id="test-connection-btn" class="px-4 py-2 bg-gray-600 text-white rounded whitespace-nowrap hover:bg-gray-700">Test Connection</button>
+                    <div id="test-smtp-result" class="text-sm p-2 rounded w-full ml-4" style="display: none;"></div>
+                </div>
+            </div>
+        
+            <div class="flex justify-end items-center pt-4">
+                <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">Save All Settings</button>
+            </div>
+        </form>
+    </div>
+    <script>
+        const smtpForm = document.getElementById('settings-form');
+        const testConnectionBtn = document.getElementById('test-connection-btn');
+        const resultDiv = document.getElementById('test-smtp-result');
+        const portInput = document.getElementById('smtp-port-input');
+        document.getElementById('enc-starttls').addEventListener('change', () => { if(portInput.value == '465') { portInput.value = '587'; } });
+        document.getElementById('enc-ssl-tls').addEventListener('change', () => { if(portInput.value == '587') { portInput.value = '465'; } });
+        function showResult(message, status) {
+            resultDiv.style.display = 'block';
+            resultDiv.textContent = message;
+            if (status === 'error') { resultDiv.className = 'text-sm p-2 rounded w-full ml-4 bg-red-100 text-red-800'; }
+            else if (status === 'success') { resultDiv.className = 'text-sm p-2 rounded w-full ml-4 bg-green-100 text-green-800'; }
+            else { resultDiv.className = 'text-sm p-2 rounded w-full ml-4 bg-yellow-100 text-yellow-800'; }
+        }
+        testConnectionBtn.addEventListener('click', async () => {
+            showResult('Testing connection...', 'pending');
+            const formData = new FormData(smtpForm);
+            try {
+                const response = await fetch('/settings/test_connection', { method: 'POST', body: formData });
+                const data = await response.json();
+                if (!response.ok) { throw new Error(data.detail); }
+                showResult(data.message, 'success');
+            } catch (error) {
+                showResult('Error: ' + error.message, 'error');
+            }
+        });
+    </script>
+    {% endblock %}

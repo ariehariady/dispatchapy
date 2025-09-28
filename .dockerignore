@@ -1,0 +1,19 @@
+Ignore virtual environment
+.venv/
+venv/
+.vscode/
+
+Ignore Python's cache files
+pycache/
+*.pyc
+
+Ignore the data directory (this should be a volume, not part of the image)
+data/
+*.db
+*.db-journal
+
+Ignore Docker and Git files
+Dockerfile
+.dockerignore
+.git
+.gitignore

@@ -1,0 +1,118 @@
+{% extends 'base.html' %}
+    {% block content %}
+    <div class="bg-white p-6 rounded shadow ">
+        <h2 class="text-lg font-semibold mb-4">Create New Endpoint</h2>
+        <form method="post" action="/endpoints/new" id="endpoint-form">
+            <!-- Section 1: Endpoint Details -->
+            <div class="grid grid-cols-1 gap-4 border-b pb-4">
+                <div>
+                    <label class="text-sm font-medium">Endpoint Path</label>
+                    <input name="path" class="p-2 border rounded w-full mt-1" placeholder="e.g. send_invoice_reminder" required />
+                </div>
+                <div>
+                    <label class="text-sm font-medium">Description</label>
+                    <input name="desc" class="p-2 border rounded w-full mt-1" placeholder="Optional description of this endpoint" />
+                </div>
+                <div class="border p-3 rounded">
+                    <label class="text-sm font-medium">Required Incoming Parameters</label>
+                    <p class="text-xs text-gray-500 mt-1">Define parameters the client must send. `ref` and `scope` are defaults.</p>
+                    <div id="incoming-params-container" class="mt-2 space-y-2"></div>
+                    <div class="flex items-center gap-2 mt-3 pt-3 border-t">
+                        <input type="text" id="new-incoming-param-name" placeholder="Add custom parameter..." class="p-2 border rounded flex-grow">
+                        <button type="button" id="add-incoming-param-btn" class="px-3 py-2 bg-gray-600 text-white rounded w-20">Add</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Section 2: Resource Association -->
+            <div class="border p-3 rounded mt-4">
+                <label class="text-sm font-medium">Associated Resources (Failover Sequence)</label>
+                <p class="text-xs text-gray-500 mt-1">Drag the handle (&#9776;) to reorder. By default, all available resources are added. Remove any you don't need.</p>
+                <div id="resources-container" class="mt-2 space-y-2"></div>
+                <div id="resource-adder" class="flex items-center gap-2 mt-3 pt-3 border-t">
+                    <select id="available-resource-select" class="p-2 border rounded flex-grow"></select>
+                    <button type="button" id="add-resource-btn" class="px-3 py-2 bg-gray-600 text-white rounded w-20">Add</button>
+                </div>
+            </div>
+            
+            <div class="flex justify-end items-center space-x-3 border-t pt-4 mt-6">
+                <a href="/endpoints" class="px-4 py-2 bg-gray-200 text-gray-800 rounded">Discard</a>
+                <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded">Save and Configure Rules</button>
+            </div>
+        </form>
+    </div>
+    <script>
+        const incomingParamsContainer = document.getElementById('incoming-params-container');
+        const newIncomingParamNameInput = document.getElementById('new-incoming-param-name');
+        const addIncomingParamBtn = document.getElementById('add-incoming-param-btn');
+        const resourcesContainer = document.getElementById('resources-container');
+        const addResourceBtn = document.getElementById('add-resource-btn');
+        const availableSelect = document.getElementById('available-resource-select');
+        const resourceAdder = document.getElementById('resource-adder');
+        const allResources = {{ all_resources | tojson | safe }};
+
+        // --- Logic for Incoming Params ---
+        function createIncomingParamRow(paramName, isReadonly = false) {
+            if (!paramName) return;
+            const row = document.createElement('div');
+            row.className = 'flex items-center gap-2';
+            let readonlyAttrs = isReadonly ? 'readonly class="p-2 border rounded bg-gray-100 flex-grow"' : 'class="p-2 border rounded bg-gray-100 flex-grow" readonly';
+            let buttonHtml = isReadonly ? '<div class="w-20"></div>' : `<button type="button" class="px-3 py-2 bg-red-600 text-white rounded w-20 flex-shrink-0" onclick="this.parentElement.remove()">Remove</button>`;
+            row.innerHTML = `<input type="hidden" name="required_params" value="${paramName}"><input type="text" value="${paramName}" ${readonlyAttrs}>${buttonHtml}`;
+            incomingParamsContainer.appendChild(row);
+        }
+        addIncomingParamBtn.addEventListener('click', () => {
+            createIncomingParamRow(newIncomingParamNameInput.value.trim());
+            newIncomingParamNameInput.value = '';
+        });
+        
+        // --- Logic for Resource Association ---
+        function createResourceRow(resourceId, resourceName) {
+            const row = document.createElement('div');
+            row.className = 'flex items-center gap-2 p-2 bg-gray-50 rounded border';
+            row.dataset.resourceId = resourceId;
+            row.innerHTML = `
+                <span class="cursor-grab text-gray-400" style="font-size: 1.2rem; line-height: 1;">&#9776;</span>
+                <input type="hidden" name="resource_sequence" value="${resourceId}">
+                <input type="text" class="p-2 border rounded bg-gray-100 flex-grow" value="${resourceName}" readonly>
+                <button type="button" class="px-3 py-2 bg-red-600 text-white rounded w-20 flex-shrink-0" onclick="removeResource(this, ${resourceId}, '${resourceName}')">Remove</button>
+            `;
+            resourcesContainer.appendChild(row);
+        }
+
+        function updateAvailableResourcesDropdown() {
+            const associatedIds = new Set(Array.from(resourcesContainer.querySelectorAll('[data-resource-id]')).map(el => el.dataset.resourceId));
+            availableSelect.innerHTML = '<option value="">-- Select a resource to add --</option>';
+            allResources.forEach(res => {
+                if (!associatedIds.has(String(res.id))) {
+                    availableSelect.innerHTML += `<option value="${res.id}">${res.name}</option>`;
+                }
+            });
+            resourceAdder.style.display = availableSelect.options.length > 1 ? 'flex' : 'none';
+        }
+
+        function removeResource(button, resourceId, resourceName) {
+            button.parentElement.remove();
+            updateAvailableResourcesDropdown();
+        }
+
+        addResourceBtn.addEventListener('click', () => {
+            const selectedId = availableSelect.value;
+            if (!selectedId) return;
+            const selectedName = availableSelect.options[availableSelect.selectedIndex].text;
+            createResourceRow(selectedId, selectedName);
+            updateAvailableResourcesDropdown();
+        });
+
+        new Sortable(resourcesContainer, { animation: 150, handle: '.cursor-grab', ghostClass: 'bg-blue-100' });
+
+        // --- Pre-population on page load ---
+        createIncomingParamRow('ref', true);
+        createIncomingParamRow('scope', true);
+
+        if (allResources && allResources.length > 0) {
+            allResources.forEach(res => createResourceRow(res.id, res.name));
+        }
+        updateAvailableResourcesDropdown();
+    </script>
+    {% endblock %}

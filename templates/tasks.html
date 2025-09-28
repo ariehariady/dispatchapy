@@ -1,0 +1,58 @@
+{% extends 'base.html' %}
+    {% block content %}
+    <div class="bg-white p-6 rounded shadow ">
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-lg font-semibold">
+                Tasks 
+                {% if current_status %}
+                    <span class="text-base font-normal text-gray-600">- Status: {{ current_status }}</span>
+                {% endif %}
+            </h2>
+            <form method="get" action="/tasks" class="flex items-center space-x-2">
+                {% if current_status %}
+                    <input type="hidden" name="status" value="{{ current_status }}">
+                {% endif %}
+                <input type="search" name="search" value="{{ current_search or '' }}" placeholder="Search in payload..." class="p-2 border rounded">
+                <button class="px-3 py-2 bg-blue-600 text-white rounded">Search</button>
+            </form>
+        </div>
+
+        <div class="overflow-x-auto">
+            <table class="min-w-full text-sm">
+                <thead class="bg-gray-100">
+                    <tr>
+                        <th class="px-3 py-2 text-left">ID</th>
+                        <th class="px-3 py-2 text-left">Client</th>
+                        <th class="px-3 py-2 text-left">Ref / Scope</th>
+                        <th class="px-3 py-2 text-left">Endpoint</th>
+                        <th class="px-3 py-2 text-left">Resource Used</th> <th class="px-3 py-2 text-left">Status</th>
+                        <th class="px-3 py-2 text-left">Created</th>
+                        <th class="px-3 py-2 text-left">Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for t in tasks %}
+                    <tr class="border-t">
+                        <td class="px-3 py-2">{{ t.id }}</td>
+                        <td class="px-3 py-2">{{ t.client_name or 'N/A' }}</td>
+                        <td class="px-3 py-2 text-xs">
+                            <div><strong>Ref:</strong> {{ t.ref_id }}</div>
+                            <div><strong>Scope:</strong> {{ t.scope }}</div>
+                        </td>
+                        <td class="px-3 py-2">{{ t.endpoint_path }}</td>
+                        <td class="px-3 py-2">{{ t.resource_name or 'N/A' }}</td> <td class="px-3 py-2">{{ t.status }}</td>
+                        <td class="px-3 py-2">{{ t.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                        <td class="px-3 py-2">
+                            <a class="text-blue-600" href="/task/{{ t.id }}">View</a>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="8" class="text-center p-4 text-gray-500">No incoming task yet.</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endblock %}

@@ -1,0 +1,109 @@
+{% extends 'base.html' %}
+    {% block content %}
+    <!-- Loading Overlay -->
+    <div id="loading-overlay" style="display: none;" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div class="text-white text-lg">Retrying task, please wait...</div>
+    </div>
+
+    <div class="bg-white p-6 rounded shadow  space-y-6">
+        <div>
+            <div class="flex justify-between items-center">
+                <h2 class="text-lg font-semibold">Task Details #{{ task.id }}</h2>
+                <a href="/tasks" class="text-blue-600">&larr; Back to Task List</a>
+            </div>
+            <div class="grid grid-cols-4 gap-4 mt-3 text-sm">
+                <div><strong>Client:</strong> {{ task.client_name or 'N/A' }}</div>
+                <div><strong>Endpoint:</strong> /api/{{ task.endpoint_path }}</div>
+                <div><strong>Final Resource:</strong> {{ task.resource_name or 'auto' }}</div>
+                <div><strong>Retries:</strong> {{ task.retry_count }} / {{ task.max_retries }}</div>
+                <div><strong>Final Status:</strong> <span id="task-status">{{ task.status }}</span></div>
+            </div>
+        </div>
+
+        <div>
+            <h3 class="text-md font-semibold border-b pb-2 mb-3">Attempt History</h3>
+            <table class="min-w-full text-sm">
+            <thead class="bg-gray-100"><tr>
+                <th class="px-3 py-2 text-left">Timestamp (Local Time)</th>
+                <th class="px-3 py-2 text-left">Resource Used</th>
+                <th class="px-3 py-2 text-left">Status</th>
+                <th class="px-3 py-2 text-left">Details</th>
+            </tr></thead>
+            <tbody>
+            {% for attempt in attempt_logs %}
+                <tr class="border-t">
+                <td class="utc-timestamp px-3 py-2 whitespace-nowrap">{{ attempt.attempt_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                <td class="px-3 py-2">{{ attempt.resource_name }}</td>
+                <td class="px-3 py-2">
+                    {% if attempt.status == 'success' %}<span class="font-semibold text-green-600">Success</span>
+                    {% elif attempt.status == 'failed' %}<span class="font-semibold text-red-600">Failed</span>
+                    {% else %}<span class="text-gray-600">{{ attempt.status }}</span>{% endif %}
+                </td>
+                <td class="px-3 py-2 font-mono text-xs">{{ attempt.details[:300] }}</td>
+                </tr>
+            {% else %}
+                <tr><td colspan="4" class="text-center p-4 text-gray-500">No specific attempts have been logged.</td></tr>
+            {% endfor %}
+            </tbody>
+            </table>
+        </div>
+        
+        <div class="grid grid-cols-2 gap-6">
+            <div><h3 class="text-md font-semibold">Original Payload (Source)</h3><pre class="mt-2 p-3 bg-gray-100 rounded text-xs">{{ task.source_payload | tojson(indent=2) }}</pre></div>
+            <div><h3 class="text-md font-semibold">Transformed Payload (Target)</h3><pre class="mt-2 p-3 bg-gray-100 rounded text-xs">{{ task.target_payload | tojson(indent=2) }}</pre></div>
+        </div>
+
+        <div>
+            <h3 class="text-md font-semibold">Internal Logs</h3>
+            <div class="mt-2 space-y-1 text-sm">
+                {% for l in logs %}<div class="p-2 bg-gray-50 rounded font-mono text-xs"><span class="utc-timestamp">{{ l.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</span> — {{ l.message }}</div>{% else %}<div class="text-sm text-gray-500">No internal logs</div>{% endfor %}
+            </div>
+        </div>
+        
+        <div id="retry-container" class="mt-4 border-t pt-4">
+            {% if task.status == 'failed' or task.status == 'pending' %}
+                <button id="retry-btn" data-tid="{{ task.id }}" class="px-4 py-2 bg-yellow-500 text-white rounded hover:bg-yellow-600">Retry Task</button>
+            {% endif %}
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            document.querySelectorAll('.utc-timestamp').forEach(el => {
+                const utcDateString = el.textContent.trim();
+                if (utcDateString) {
+                    const date = new Date(utcDateString + ' UTC');
+                    const options = { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true };
+                    el.textContent = date.toLocaleString(undefined, options);
+                    el.title = `Original time: ${utcDateString} UTC`;
+                }
+            });
+        });
+
+        const retryBtn = document.getElementById('retry-btn');
+        const loadingOverlay = document.getElementById('loading-overlay');
+        if (retryBtn) {
+            retryBtn.addEventListener('click', async () => {
+                const taskId = retryBtn.dataset.tid;
+                loadingOverlay.style.display = 'flex'; // Show loading screen
+
+                try {
+                    const response = await fetch(`/task/${taskId}/retry`, { method: 'POST' });
+                    const data = await response.json();
+                    
+                    if (!response.ok) {
+                        throw new Error(data.detail || 'An unknown error occurred during retry.');
+                    }
+                    
+                    alert('Success! ' + data.message);
+                    window.location.reload();
+
+                } catch (error) {
+                    alert('Retry Failed: ' + error.message);
+                } finally {
+                    loadingOverlay.style.display = 'none'; // Hide loading screen
+                }
+            });
+        }
+    </script>
+    {% endblock %}
