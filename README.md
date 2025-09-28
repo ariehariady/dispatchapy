@@ -80,22 +80,68 @@ The "Rules" page is where you define how data is transformed. It has two main pa
 
 ---
 
-## 🛠️ Technical Documentation
+## ⚙️ How to Use: A Step-by-Step Guide
 
-### Tech Stack
-- **Backend:** FastAPI (Python)
-- **Database:** SQLite (via SQLAlchemy)
-- **UI:** Jinja2 templates with Tailwind CSS and Alpine.js
-- **Containerization:** Docker & Docker Compose
+Once Dispatchapy is running, follow these steps to configure your first endpoint.
 
-### Architecture
-Dispatchapy runs on two main background processes (workers):
-1.  **Task Execution Worker (`worker_loop`):** This is a high-frequency worker that constantly polls the database for `pending` tasks. It finds the next healthy resource in an endpoint's failover sequence and attempts to execute the task. It handles all retry and failover logic.
-2.  **Health Check Worker (`resource_health_check_loop`):** This is a lower-frequency worker that periodically checks the status of all active resources. It is responsible for marking resources as `UP` or `DOWN` and triggering failure notifications.
+### Step 1: Configure SMTP (Optional)
+For failure notifications, you must first configure your email server in **Settings**.
+
+### Step 2: Create Resources
+Resources are the destination APIs you want to send data to.
+1.  Navigate to **Resources** and click **"+ New Resource"**.
+2.  Fill in the details. For example, imagine a logging service that expects `{"transactionId", "accountId", "action"}`.
+    - **Name:** `Primary Logging Service`
+    - **Endpoint URL:** `https://api.logservice.com/v1/events`
+    - **Headers:** `{"X-API-Key": "YOUR_SECRET_KEY"}`
+    - **Required Parameters:** `["transactionId", "accountId", "action"]`
+3.  Click **"Save Resource"**. Repeat for any backup providers.
+
+### Step 3: Create an Endpoint
+An endpoint is the public-facing URL your own applications will call.
+1.  Navigate to **Endpoints** and click **"+ New Endpoint"**.
+2.  Define the endpoint's attributes. For our example, your application sends `{"event_id", "user_id", "event_type"}`.
+    - **Endpoint Path:** `log_user_event`
+    - **Required Incoming Parameters:** `["event_id", "user_id", "event_type"]`
+    - **Associated Resources:** Add your "Primary Logging Service".
+3.  Click **"Save and Configure Rules"**.
+
+### Step 4: Configure Rules
+Rules translate your incoming data into the format each resource expects.
+1.  On the **Rules** page, you will see a card for Mapping Resource Parameter.
+2.  Map its required parameters to your endpoint's incoming parameters. For example:
+    - Map `transactionId` -> `event_id`
+    - Map `accountId` -> `user_id`
+    - Map `action` -> `event_type`
+3.  Click **"Save and Add Clients"**.
+
+### Step 5: Create a Client
+A client is an application that is authorized to use your endpoint.
+1.  On the **Clients** page, you will see authorized clients and its token for your endpoint.
+2.  For adding new clients, enter a name (e.g., "Main Web App") and click **"Add Client"**.
+3.  Copy the unique **API Token** that is generated, it will be required as "X-API-Token" on the headers of endpoint requests.
+
+### Step 6: Use the Endpoint
+You are now ready to dispatch an API call!
+From your application, make a `POST` request to your endpoint, including the client's token.
+
+**Example `curl` command:**
+```bash
+curl -X POST "http://localhost:8000/api/log_user_event" \
+-H "Content-Type: application/json" \
+-H "X-API-Token: YOUR_GENERATED_CLIENT_TOKEN" \
+-d '{
+    "ref": "req-987654",
+    "scope": "production",
+    "event_id": "evt_abc123",
+    "user_id": 42,
+    "event_type": "USER_LOGIN_SUCCESS"
+}'
+```
 
 ---
 
-## 💡 Potential Usage
+## 💡 Use Cases
 
 While I developed this originally for managing notification services for my projects, Dispatchapy is a generic API dispatcher and can be used to add resilience and a unified interface to any API that accepts a `POST` request.
 
