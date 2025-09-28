@@ -27,7 +27,7 @@ This is the recommended way to run Dispatchapy for both development and producti
 
 1.  **Clone the Repository:**
     ```bash
-    git clone https://your-repo-url/dispatchapy.git
+    git clone https://github.com/ariehariady/dispatchapy.git
     cd dispatchapy
     ```
 
