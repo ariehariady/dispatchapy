@@ -1,8 +1,4 @@
-# What is Dispatchapy?
-
-<div align="right">
-  <img src="https://raw.githubusercontent.com/user/repo/main/statics/favicon.svg" alt="Dispatchapy Logo" width="80">
-</div>
+# What is <img height="25" width="25" src="https://github.com/ariehariady/dispatchapy/blob/main/statics/favicon.png" alt="Dispatchapy Logo" width="80"> Dispatchapy?
 
 **Dispatchapy** is a resilient, high-availability API dispatch gateway. It is designed to be a single, reliable entry point for sending notifications and webhooks through multiple providers. With features like automatic failover, health checks, and a full UI for configuration, it ensures your critical communications are always delivered.
 
@@ -111,6 +107,3 @@ While originally conceived for WhatsApp, Dispatchapy is a generic API dispatcher
 - **IoT (Internet of Things):** Sending commands to smart devices.
 
 ---
-<div align="center">
-  <p>Dispatchapy - An API Dispatch Gateway by ariehariady3@gmail.com.</p>
-</div>
