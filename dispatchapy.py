@@ -1,6 +1,6 @@
 """
 Dispatchapy
-Copyright (c) 2025 Arie Hariady
+Copyright (c) 2025 Arie Hariady (ariehariady@gmail.com)
 
 High-availability API dispatch gateway. It is designed to be a single, 
 reliable entry point for sending notifications and webhooks through multiple providers. 
