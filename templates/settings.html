@@ -29,6 +29,24 @@
                             <p class="text-xs text-gray-500 mt-1">The worker will wait for a random duration within this range before processing each task.</p>
                         </div>
                     </div>
+                    
+                    <!-- NEW: Task Cleanup Settings -->
+                    <div class="mt-6 pt-4 border-t">
+                        <div class="grid grid-cols-2 gap-6">
+                            <div>
+                                <label class="flex items-center">
+                                    <input type="checkbox" id="enable-task-cleanup" name="enable_task_cleanup" value="true" {% if settings.enable_task_cleanup == 'true' %}checked{% endif %} class="mr-2">
+                                    <span class="text-sm font-medium">Enable Automatic Task Cleanup</span>
+                                </label>
+                                <p class="text-xs text-gray-500 mt-1">Automatically delete old completed tasks to save disk space.</p>
+                                
+                                <div id="cleanup-days-section" class="mt-3" style="display: {% if settings.enable_task_cleanup == 'true' %}block{% else %}none{% endif %};">
+                                    <input type="number" name="task_cleanup_days" value="{{ settings.task_cleanup_days or '30' }}" min="1" class="p-2 border rounded w-full mt-1">
+                                    <p class="text-xs text-gray-500 mt-1">Tasks older than this number of days will be permanently deleted.</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -70,6 +88,15 @@
         const testConnectionBtn = document.getElementById('test-connection-btn');
         const resultDiv = document.getElementById('test-smtp-result');
         const portInput = document.getElementById('smtp-port-input');
+
+        // Task cleanup checkbox toggle functionality
+        const enableTaskCleanupCheckbox = document.getElementById('enable-task-cleanup');
+        const cleanupDaysSection = document.getElementById('cleanup-days-section');
+        
+        enableTaskCleanupCheckbox.addEventListener('change', function() {
+            cleanupDaysSection.style.display = this.checked ? 'block' : 'none';
+        });
+
         document.getElementById('enc-starttls').addEventListener('change', () => { if(portInput.value == '465') { portInput.value = '587'; } });
         document.getElementById('enc-ssl-tls').addEventListener('change', () => { if(portInput.value == '587') { portInput.value = '465'; } });
         function showResult(message, status) {

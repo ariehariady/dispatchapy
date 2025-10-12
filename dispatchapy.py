@@ -627,7 +627,50 @@ async def worker_loop(worker_id: str):
         # This makes the worker loop extremely fast and able to handle many tasks.
         print(f"[{worker_id}] Dispatched task {task_id_to_process} to background thread.")
         await run_in_threadpool(run_task_in_thread, task_id_to_process, healthy_resources)
+
+
+async def task_cleanup_loop():
+    """
+    Background loop that periodically cleans up old tasks based on settings.
+    """
+    while True:
+        await asyncio.sleep(3600)  # Check every hour
         
+        db = SessionLocal()
+        try:
+            # Check if cleanup is enabled
+            cleanup_enabled = get_setting(db, "enable_task_cleanup", "false")
+            if cleanup_enabled.lower() != "true":
+                continue
+                
+            # Get the cleanup age in days
+            cleanup_days = int(get_setting(db, "task_cleanup_days", "30"))
+            cutoff_date = datetime.utcnow() - timedelta(days=cleanup_days)
+            
+            # Find old completed tasks (success or failed status)
+            old_tasks_query = db.query(Task).filter(
+                Task.created_at < cutoff_date,
+                Task.status.in_(["success", "failed"])
+            )
+            
+            old_task_ids = [task.id for task in old_tasks_query.all()]
+            if old_task_ids:
+                # Delete related logs first (foreign key constraint)
+                db.query(Log).filter(Log.task_id.in_(old_task_ids)).delete(synchronize_session=False)
+                db.query(TaskLog).filter(TaskLog.task_id.in_(old_task_ids)).delete(synchronize_session=False)
+                db.query(TaskAttemptLog).filter(TaskAttemptLog.task_id.in_(old_task_ids)).delete(synchronize_session=False)
+                
+                # Delete the tasks themselves
+                deleted_count = old_tasks_query.delete(synchronize_session=False)
+                db.commit()
+                
+                print(f"Task cleanup: Deleted {deleted_count} old tasks and their logs (older than {cleanup_days} days)")
+            
+        except Exception as e:
+            print(f"Error during task cleanup: {e}")
+        finally:
+            db.close()
+
 
 def run_task_in_thread(task_id: int,healthy_resources) -> (bool, int, str):
     """
@@ -714,6 +757,7 @@ async def startup():
     for i in range(WORKER_COUNT):
         asyncio.create_task(worker_loop(f"w-{i}"))
     asyncio.create_task(resource_health_check_loop())
+    asyncio.create_task(task_cleanup_loop())
 
 # -------------------------
 # Resource health checker
@@ -1664,7 +1708,10 @@ def settings_form(request: Request):
         "smtp_encryption": get_setting(db, "smtp_encryption", "starttls"),
         "max_failure_attempts": get_setting(db, "max_failure_attempts", "5"),
         "task_delay_min": get_setting(db, "task_delay_min", "1"),
-        "task_delay_max": get_setting(db, "task_delay_max", "5")
+        "task_delay_max": get_setting(db, "task_delay_max", "5"),
+        # NEW: Task cleanup settings
+        "enable_task_cleanup": get_setting(db, "enable_task_cleanup", "false"),
+        "task_cleanup_days": get_setting(db, "task_cleanup_days", "30")
     }
     db.close()
     return templates.TemplateResponse("settings.html", {"request": request, "settings": settings})
@@ -1676,7 +1723,10 @@ def settings_save(
     email_from: str = Form(""), smtp_encryption: str = Form("starttls"),
     max_failure_attempts: int = Form(5),
     task_delay_min: int = Form(1),
-    task_delay_max: int = Form(5)
+    task_delay_max: int = Form(5),
+    # NEW: Task cleanup parameters
+    enable_task_cleanup: bool = Form(False),
+    task_cleanup_days: int = Form(30)
 ):
     db = SessionLocal()
     settings_data = {
@@ -1685,7 +1735,10 @@ def settings_save(
         "email_from": email_from, "smtp_encryption": smtp_encryption,
         "max_failure_attempts": str(max_failure_attempts),
         "task_delay_min": str(task_delay_min),
-        "task_delay_max": str(task_delay_max)
+        "task_delay_max": str(task_delay_max),
+        # NEW: Add cleanup settings
+        "enable_task_cleanup": "true" if enable_task_cleanup else "false",
+        "task_cleanup_days": str(task_cleanup_days)
     }
     for key, value in settings_data.items():
         setting = db.query(Setting).get(key)
@@ -1696,6 +1749,7 @@ def settings_save(
     db.commit()
     db.close()
     return RedirectResponse("/", status_code=303)
+
 
 @app.post("/settings/test_connection", include_in_schema=False, dependencies=[Depends(verify_session)])
 def test_smtp_connection(

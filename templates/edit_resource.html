@@ -28,10 +28,11 @@
 
             <!-- Dynamic Required Params -->
             <div class="border p-3 rounded">
-                <label class="text-sm font-medium">Required Parameters & Health Check Values</label>
+                <label class="text-sm font-medium">Required Payload Keys</label>
+                <p class="text-xs text-gray-500 mt-1 mb-2">Define the keys that must be present in the JSON payload. Health check values are only required if health monitoring is enabled below.</p>
                 <div id="params-container" class="mt-2 space-y-2"></div>
                 <div class="flex items-center gap-2 mt-3 pt-3 border-t">
-                    <input type="text" id="new-param-name" placeholder="Add parameter name..." class="p-2 border rounded flex-grow">
+                    <input type="text" id="new-param-name" placeholder="Add payload key name..." class="p-2 border rounded flex-grow">
                     <button type="button" id="add-param-btn" class="px-3 py-2 bg-gray-600 text-white rounded w-20">Add</button>
                 </div>
             </div>
@@ -114,7 +115,9 @@
             row.innerHTML = `
                 <input type="hidden" name="required_params" value="${paramName}">
                 <input type="text" value="${paramName}" class="p-2 border rounded bg-gray-100 flex-grow" readonly>
-                <input type="text" name="param_test_values" value="${testValue || ''}" placeholder="Health check value..." class="p-2 border rounded flex-grow">
+                <div x-show="isHealthCheckEnabled" class="flex-grow">
+                    <input type="text" name="param_test_values" value="${testValue || ''}" placeholder="Health check value..." class="p-2 border rounded w-full">
+                </div>
                 <button type="button" class="px-3 py-2 bg-red-600 text-white rounded w-20 flex-shrink-0" onclick="this.parentElement.remove()">Remove</button>
             `;
             paramsContainer.appendChild(row);
@@ -135,7 +138,7 @@
             });
             if (!allValuesFilled) {
                 event.preventDefault();
-                alert('A "Health check value" is required for each parameter when Health Check is enabled.');
+                alert('A "Health check value" is required for each payload key when Health Check is enabled.');
                 return;
             }
 
