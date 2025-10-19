@@ -30,6 +30,7 @@ from datetime import timedelta
 import smtplib
 from email.mime.text import MIMEText
 from jinja2 import Environment, FileSystemLoader
+import re
 from sqlalchemy import (
     Column,
     Integer,
@@ -41,9 +42,15 @@ from sqlalchemy import (
     create_engine,
     func,
 )
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker, declarative_base, scoped_session, Session
-from sqlalchemy import cast, String, or_
+from sqlalchemy import cast, String, or_, text
 from starlette.concurrency import run_in_threadpool
+import fcntl
+import time
+from threading import Thread
+import socket
+from urllib.parse import urlparse
 
 # --- Authentication Configuration ---
 GATEWAY_ADMIN_PASSWORD = os.getenv("GATEWAY_ADMIN_PASSWORD", "admin")
@@ -112,8 +119,22 @@ def custom_openapi():
     )
 
     db = SessionLocal()
-    endpoints = db.query(Endpoint).filter(Endpoint.is_active == True).all()
-    db.close()
+    try:
+        endpoints = db.query(Endpoint).filter(Endpoint.is_active == True).all()
+    except OperationalError as oe:
+        # Attempt auto-migration then retry once
+        print('custom_openapi: OperationalError while querying endpoints, attempting auto-migrations...')
+        try:
+            run_auto_migrations(engine)
+            db.close()
+            db = SessionLocal()
+            endpoints = db.query(Endpoint).filter(Endpoint.is_active == True).all()
+        except Exception as e:
+            print('custom_openapi: migration retry failed:', e)
+            endpoints = []
+    finally:
+        try: db.close()
+        except Exception: pass
 
     for endpoint in endpoints:
         if not endpoint.required_params: continue
@@ -179,6 +200,159 @@ Base = declarative_base()
 engine = create_engine(SQLITE_URL, connect_args={"check_same_thread": False})
 SessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=engine))
 
+# In-memory manual-check guard to prevent duplicate near-simultaneous manual checks
+manual_check_locks = {}
+
+
+def _sqlite_column_type(col):
+    """Map SQLAlchemy column types to simple SQLite type names."""
+    from sqlalchemy import String, Integer, Boolean, DateTime, Text, JSON
+    if isinstance(col.type, String):
+        return 'TEXT'
+    if isinstance(col.type, Text):
+        return 'TEXT'
+    if isinstance(col.type, DateTime):
+        return 'DATETIME'
+    if isinstance(col.type, Integer):
+        return 'INTEGER'
+    if isinstance(col.type, Boolean):
+        return 'INTEGER'
+    # SQLite has no native JSON type; store as TEXT
+    if isinstance(col.type, JSON):
+        return 'TEXT'
+    # Fallback
+    return 'TEXT'
+
+
+def run_auto_migrations(engine):
+    """A minimal, non-destructive auto-migration helper for SQLite.
+
+    It inspects each ORM-mapped table and issues ALTER TABLE ADD COLUMN
+    for any Column defined in the model but missing in the DB table.
+    Only supports simple column types and ADD COLUMN (no renames or drops).
+    """
+    conn = engine.connect()
+    inspector = None
+    try:
+        from sqlalchemy import inspect
+        inspector = inspect(engine)
+    except Exception:
+        inspector = None
+
+    # Iterate declarative metadata tables instead of relying on the
+    # internal class registry (which may not exist in some SQLAlchemy versions).
+    for tablename, table in Base.metadata.tables.items():
+        try:
+            # Get existing columns from SQLite using inspector or PRAGMA fallback
+            existing = set()
+            try:
+                if inspector:
+                    col_info = inspector.get_columns(tablename)
+                    existing = {c['name'] for c in col_info}
+                else:
+                    from sqlalchemy import text
+                    res = conn.execute(text(f"PRAGMA table_info('{tablename}')")).fetchall()
+                    # PRAGMA returns rows: cid, name, type, notnull, dflt_value, pk
+                    existing = {r[1] for r in res}
+            except Exception:
+                existing = set()
+
+            # Compare against model/table columns
+            for col in table.columns:
+                # Skip primary key columns (can't sensibly add PKs to existing tables)
+                if col.primary_key:
+                    continue
+                if col.name in existing:
+                    continue
+
+                # Build a minimal ALTER TABLE statement
+                col_type = _sqlite_column_type(col)
+                alter_sql = f'ALTER TABLE "{tablename}" ADD COLUMN "{col.name}" {col_type}'
+                try:
+                    from sqlalchemy import text
+                    conn.execute(text(alter_sql))
+                    print(f"Auto-migration: Added column {col.name} to {tablename}")
+                    # If we added health_check_method, set defaults for existing rows
+                    if col.name == 'health_check_method':
+                        try:
+                            conn.execute(text(f"UPDATE \"{tablename}\" SET health_check_method = 'simple' WHERE health_check_method IS NULL"))
+                            print(f"Auto-migration: Set default 'simple' for existing {tablename}.health_check_method rows")
+                        except Exception as ee:
+                            print(f"Auto-migration: Failed to set default for {tablename}.health_check_method: {ee}")
+                except Exception as e:
+                    print(f"Auto-migration failed for {tablename}.{col.name}: {e}")
+        except Exception as e:
+            print(f"Auto-migration: skipped table {tablename} due to error: {e}")
+    conn.close()
+
+
+def ensure_clients_endpoint_nullable(engine):
+    """If the existing clients.endpoint_id column is NOT NULL in SQLite,
+    recreate the table with endpoint_id nullable by copying data.
+    This is a one-time, safe migration applied at runtime when needed.
+    """
+    conn = engine.connect()
+    try:
+        res = conn.execute("PRAGMA table_info('clients')").fetchall()
+        # PRAGMA columns: cid, name, type, notnull, dflt_value, pk
+        endpoint_col = None
+        for r in res:
+            if r[1] == 'endpoint_id':
+                endpoint_col = r
+                break
+        if not endpoint_col:
+            return
+        notnull = endpoint_col[3]
+        if notnull == 0:
+            return
+
+        print('Migrating clients.endpoint_id to be nullable...')
+        # Build new table with endpoint_id nullable. Keep other columns similar.
+        conn.execute(text('''
+            CREATE TABLE IF NOT EXISTS clients_new (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                token TEXT UNIQUE NOT NULL,
+                endpoint_id INTEGER,
+                description TEXT,
+                created_at DATETIME
+            )
+        '''))
+
+        conn.execute(text('''
+            INSERT INTO clients_new (id, name, token, endpoint_id, description, created_at)
+            SELECT id, name, token, endpoint_id, description, created_at FROM clients;
+        '''))
+
+        conn.execute(text('DROP TABLE clients;'))
+        conn.execute(text('ALTER TABLE clients_new RENAME TO clients;'))
+        print('Migration complete: clients.endpoint_id is now nullable')
+    except Exception as e:
+        print('Failed to alter clients table nullability:', e)
+    finally:
+        conn.close()
+
+
+def _acquire_resource_lock(rid: int):
+    """Try to acquire a non-blocking file lock for a specific resource.
+
+    Returns an open file object when lock acquired, or None when another
+    process/thread holds the lock.
+    """
+    lock_dir = os.path.join(DATA_DIR, 'locks')
+    try:
+        os.makedirs(lock_dir, exist_ok=True)
+        lock_path = os.path.join(lock_dir, f'resource_{rid}.lock')
+        f = open(lock_path, 'w')
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return f
+        except IOError:
+            f.close()
+            return None
+    except Exception:
+        return None
+
 class ExamplePayload(BaseModel):
     phone: str = Field(..., example="6281234567890")
     message: str = Field(..., example="This is a test notification from the gateway.")
@@ -197,6 +371,7 @@ class Resource(Base):
     next_health_check_at = Column(DateTime, nullable=True)
     is_health_check_enabled = Column(Boolean, default=True, nullable=False)
     health_check_test_values = Column(JSON, nullable=True)
+    health_check_method = Column(String, default='simple', nullable=False)  # 'simple' or 'actual'
     health_check_interval_min = Column(Integer, default=60, nullable=False)
     health_check_interval_max = Column(Integer, default=90, nullable=False)
     send_failure_email = Column(Boolean, default=False)
@@ -217,6 +392,11 @@ class Endpoint(Base):
     description = Column(String, nullable=True)
     required_params = Column(JSON, nullable=True)
     is_development_mode = Column(Boolean, default=False, nullable=False)
+    # When true and development mode is enabled, incoming tasks will be placed
+    # into a 'dev' state instead of being immediately processed by workers.
+    dev_hold_tasks = Column(Boolean, default=False, nullable=False)
+    # When true, the development rules editor is enabled for this endpoint.
+    dev_rules_enabled = Column(Boolean, default=False, nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
     dev_values = Column(JSON, nullable=True) # Stores {param: dev_value}
     created_at = Column(DateTime, server_default=func.now())
@@ -278,7 +458,8 @@ class Client(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)
     token = Column(String, unique=True, nullable=False, index=True)
-    endpoint_id = Column(Integer, nullable=False, index=True)
+    endpoint_id = Column(Integer, nullable=True, index=True)
+    description = Column(String, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
 class HealthCheckLog(Base):
@@ -290,6 +471,7 @@ class HealthCheckLog(Base):
     status_code = Column(Integer, nullable=True)
     response_text = Column(Text, nullable=True)
     notification_status = Column(String, nullable=True) # e.g., "sent", "failed"
+    method = Column(String, nullable=True) # 'simple' or 'actual'
 
 class Setting(Base):
     __tablename__ = "settings"
@@ -302,6 +484,13 @@ class EndpointResourceLink(Base):
     endpoint_id = Column(Integer, index=True, nullable=False)
     resource_id = Column(Integer, index=True, nullable=False)
     sequence = Column(Integer, default=0, nullable=False) # Order of execution
+
+
+class EndpointClientLink(Base):
+    __tablename__ = "endpoint_client_links"
+    id = Column(Integer, primary_key=True)
+    endpoint_id = Column(Integer, index=True, nullable=False)
+    client_id = Column(Integer, index=True, nullable=False)
 
 class TaskAttemptLog(Base):
     __tablename__ = "task_attempt_logs"
@@ -323,6 +512,20 @@ class Log(Base):
 def generate_token():
     return f"dpy_{secrets.token_urlsafe(32)}"
 
+
+try:
+    # Run lightweight auto-migrations first (non-destructive ALTER TABLE ADD COLUMN)
+    run_auto_migrations(engine)
+except Exception as e:
+    print(f"Auto-migration failed: {e}")
+
+# Ensure historic clients.endpoint_id nullability before creating tables or serving requests
+try:
+    ensure_clients_endpoint_nullable(engine)
+except Exception as e:
+    import traceback
+    print('ensure_clients_endpoint_nullable failed at startup:', e)
+    traceback.print_exc()
 
 Base.metadata.create_all(bind=engine)
 
@@ -373,9 +576,17 @@ def build_target_payload(db: Session, endpoint_id: int, resource_id: int, source
             # Check for a default rule (no condition)
             if rule.condition_param is None:
                 apply_rule = True
-            # Check for a conditional rule that matches the payload
-            elif working_payload.get(rule.condition_param) == rule.condition_value:
-                apply_rule = True
+            # Check for a conditional rule that matches the payload using 'contains'
+            else:
+                payload_val = working_payload.get(rule.condition_param)
+                if payload_val is not None and rule.condition_value is not None:
+                    try:
+                        # Coerce both to string and perform case-insensitive containment
+                        if str(rule.condition_value).lower() in str(payload_val).lower():
+                            apply_rule = True
+                    except Exception:
+                        # Fallback: no match
+                        apply_rule = False
             
             if apply_rule and rule.target_param in working_payload:
                 overrides_to_apply[rule.target_param] = rule.override_value
@@ -408,8 +619,8 @@ def build_target_payload(db: Session, endpoint_id: int, resource_id: int, source
     return target_payload
 
 def get_endpoint_status(db, endpoint: Endpoint) -> str:
-    # Check for clients
-    if db.query(Client).filter(Client.endpoint_id == endpoint.id).count() == 0:
+    # Check for clients (many-to-many via EndpointClientLink)
+    if db.query(EndpointClientLink).filter(EndpointClientLink.endpoint_id == endpoint.id).count() == 0:
         return "Missing clients"
 
     # Check for associated resources
@@ -500,6 +711,18 @@ def get_setting(db: Session, key: str, default=None):
     setting = db.query(Setting).get(key)
     return setting.value if setting else default
 
+
+def get_setting_int(db: Session, key: str, default: int):
+    """Safely read an integer setting from the DB and return a fallback on error."""
+    try:
+        val = get_setting(db, key, default)
+        # If the stored value is None, return default
+        if val is None:
+            return int(default)
+        return int(val)
+    except Exception:
+        return int(default)
+
 def get_healthy_resource(db, endpoint_id: int):
     links = db.query(EndpointResourceLink).filter(
         EndpointResourceLink.endpoint_id == endpoint_id
@@ -531,20 +754,68 @@ def perform_health_check(resource: Resource) -> (bool, int, str):
     This function DOES NOT modify the database.
     """
     is_healthy, status_code, response_text = False, None, ""
+
+    def _format_value(val, orig_payload):
+        # Recursively format strings inside dict/list structures
+        if isinstance(val, str):
+            s = val
+            # Simple replacements
+            s = s.replace("{datetime}", datetime.utcnow().isoformat())
+            s = s.replace("{resource_name}", resource.name or "")
+            s = s.replace("{resource_endpoint}", resource.endpoint or "")
+
+            # {param:KEY} -> look up in orig_payload (if present)
+            def _param_repl(m):
+                key = m.group(1)
+                v = orig_payload.get(key)
+                return str(v) if v is not None else ""
+
+            s = re.sub(r"\{param:([^}]+)\}", _param_repl, s)
+            return s
+        elif isinstance(val, dict):
+            return {k: _format_value(v, orig_payload) for k, v in val.items()}
+        elif isinstance(val, list):
+            return [_format_value(x, orig_payload) for x in val]
+        else:
+            return val
+
+    def _simple_tcp_check(url: str, timeout: float = 3.0):
+        try:
+            p = urlparse(url)
+            host = p.hostname
+            port = p.port
+            if not host:
+                return False, None, "invalid URL"
+            if not port:
+                port = 443 if p.scheme == 'https' else 80
+            sock = socket.create_connection((host, port), timeout=timeout)
+            sock.close()
+            # Pure TCP connect succeeded — this is a non-invasive "ping-like" result.
+            return True, None, f"tcp:{host}:{port}:connected"
+        except Exception as e:
+            return False, None, f"tcp_error:{str(e)}"
+
     try:
+        method = getattr(resource, 'health_check_method', 'simple')
+        if method == 'simple':
+            return _simple_tcp_check(resource.endpoint)
+
+        # actual method: POST formatted payload
+        raw_payload = resource.health_check_test_values or {}
+        formatted_payload = _format_value(raw_payload, raw_payload)
+
         resp = requests.post(
-            url=resource.endpoint, 
-            headers=resource.headers, 
-            json=resource.health_check_test_values or {}, 
+            url=resource.endpoint,
+            headers=resource.headers,
+            json=formatted_payload,
             timeout=10
         )
-        if 200 <= resp.status_code < 300: 
-            is_healthy = True
-        status_code, response_text = resp.status_code, resp.text
+        status_code = resp.status_code
+        response_text = resp.text or ''
+        is_healthy = 200 <= status_code < 300
+        return is_healthy, status_code, response_text
     except Exception as e:
-        response_text = str(e)
-    
-    return is_healthy, status_code, response_text
+        return False, None, str(e)
 
 def execute_task_attempt(resource: Resource, payload: Dict) -> (bool, int, str):
     """
@@ -565,23 +836,29 @@ def execute_task_attempt(resource: Resource, payload: Dict) -> (bool, int, str):
 
 def trigger_failure_webhook(resource: Resource):
     if not resource.send_failure_webhook or not resource.failure_webhook_url:
-        return True
+        return 'skipped'
+
+    def _format_value(val, orig_payload):
+        # Recursively format strings inside dict/list structures
+        if isinstance(val, str):
+            try:
+                return val.format(datetime=datetime.utcnow().isoformat(), resource_name=resource.name, **(orig_payload or {}))
+            except Exception:
+                return val
+        elif isinstance(val, dict):
+            return {k: _format_value(v, orig_payload) for k, v in val.items()}
+        elif isinstance(val, list):
+            return [_format_value(v, orig_payload) for v in val]
+        else:
+            return val
 
     try:
-        # Populate placeholders in the payload
         payload = resource.failure_webhook_payload or {}
-        for key, value in payload.items():
-            if isinstance(value, str):
-                payload[key] = value.format(
-                    resource_name=resource.name,
-                    resource_endpoint=resource.endpoint,
-                    timestamp_utc=datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-                )
-
+        formatted_payload = _format_value(payload, payload)
         requests.post(
             url=resource.failure_webhook_url,
             headers=resource.failure_webhook_headers,
-            json=payload,
+            json=formatted_payload,
             timeout=10
         )
         print(f"Successfully triggered failure webhook for '{resource.name}'")
@@ -589,44 +866,6 @@ def trigger_failure_webhook(resource: Resource):
     except Exception as e:
         print(f"Failed to trigger failure webhook for '{resource.name}': {e}")
         return 'failed'
-# -------------------------
-# Worker & sending logic
-# -------------------------
-
-
-async def worker_loop(worker_id: str):
-    print(f"[{worker_id}] Worker started.")
-    worker_attempt = 1
-    while True:
-        await asyncio.sleep(1) # Poll more frequently for responsiveness
-        print(f"Start loop {worker_attempt}-th of [{worker_id}] since startup")
-        worker_attempt += 1
-        task_id_to_process = None
-        db = SessionLocal()
-        try:
-            # Find and lock a single pending task
-            task = db.query(Task).filter(Task.status == "pending").first()
-            if task:
-                healthy_resources = get_healthy_resource(db, task.endpoint_id)
-                if healthy_resources:
-                    task_id_to_process = task.id
-                    delay = task.delay
-                    task.status = "processing"
-                    db.commit()
-        finally:
-            db.close()
-
-        if not task_id_to_process:
-            await asyncio.sleep(10)
-            continue
-        else:
-            await asyncio.sleep(delay)
-        # --- The Main Logic ---
-        # The slow work is handed off to the background thread.
-        # The worker does NOT wait for it to finish. It's "fire and forget".
-        # This makes the worker loop extremely fast and able to handle many tasks.
-        print(f"[{worker_id}] Dispatched task {task_id_to_process} to background thread.")
-        await run_in_threadpool(run_task_in_thread, task_id_to_process, healthy_resources)
 
 
 async def task_cleanup_loop():
@@ -735,12 +974,54 @@ def run_task_in_thread(task_id: int,healthy_resources) -> (bool, int, str):
         db.close()
 
 
+
+async def worker_loop(worker_id: str):
+    print(f"[{worker_id}] Worker started.")
+    worker_attempt = 1
+    while True:
+        await asyncio.sleep(1) # Poll more frequently for responsiveness
+        print(f"Start loop {worker_attempt}-th of [{worker_id}] since startup")
+        worker_attempt += 1
+        task_id_to_process = None
+        db = SessionLocal()
+        try:
+            # Find and lock a single pending task
+            task = db.query(Task).filter(Task.status == "pending").first()
+            if task:
+                healthy_resources = get_healthy_resource(db, task.endpoint_id)
+                if healthy_resources:
+                    task_id_to_process = task.id
+                    delay = task.delay
+                    task.status = "processing"
+                    db.commit()
+        finally:
+            db.close()
+
+        if not task_id_to_process:
+            await asyncio.sleep(10)
+            continue
+        else:
+            await asyncio.sleep(delay)
+        # --- The Main Logic ---
+        # The slow work is handed off to the background thread.
+        # The worker does NOT wait for it to finish. It's "fire and forget".
+        # This makes the worker loop extremely fast and able to handle many tasks.
+        print(f"[{worker_id}] Dispatched task {task_id_to_process} to background thread.")
+        await run_in_threadpool(run_task_in_thread, task_id_to_process, healthy_resources)
+
+
 # -------------------------
 # Startup
 # -------------------------
 @app.on_event("startup")
 async def startup():
     print("Performing startup recovery...")
+    # Ensure DB schema is up-to-date before doing any recovery work
+    try:
+        run_auto_migrations(engine)
+    except Exception as e:
+        print('Startup auto-migration failed:', e)
+
     db = SessionLocal()
     try:
         stuck_tasks = db.query(Task).filter(Task.status == "processing").all()
@@ -769,46 +1050,92 @@ async def resource_health_check_loop():
         db = SessionLocal()
         try:
             now = datetime.utcnow()
-            query = db.query(Resource).filter(
-                Resource.is_active == True, 
-                Resource.is_health_check_enabled == True,
-                Resource.next_health_check_at <= now
-            )
-            for r in query.all():
-                old_status = r.healthy
-                is_healthy, status_code, response_text = perform_health_check(r)
-
-                # Create and save the log entry first
-                new_log = HealthCheckLog(
-                    resource_id=r.id, is_success=is_healthy, 
-                    status_code=status_code, response_text=response_text
+            # Attempt to query resources due for health check. If the DB schema is
+            # missing columns (e.g., after a code change), run the auto-migration
+            # helper and retry once.
+            try:
+                query = db.query(Resource).filter(
+                    Resource.is_active == True, 
+                    Resource.is_health_check_enabled == True,
+                    Resource.next_health_check_at <= now
                 )
-                if old_status is True and is_healthy is False:
-                    email_sent = send_failure_notification(db, r)
-                    notification_status = []
-                    if email_sent:
-                        notification_status.append(f"email {email_sent}")
-                    webhook_sent = trigger_failure_webhook(r)
-                    if webhook_sent:
-                        notification_status.append(f"webhook {webhook_sent}")
-                    new_log.notification_status = ", ".join(notification_status)
-                db.add(new_log)
-                db.commit()
-                
-                # Perform a direct, explicit UPDATE on the Resource table
-                db.query(Resource).filter(Resource.id == r.id).update({
-                    "healthy": is_healthy,
-                    "last_checked": now,
-                    "latest_health_check_result": { "success": is_healthy, "status_code": status_code, "detail": response_text[:200] },
-                    "next_health_check_at": now + timedelta(seconds=random.randint(r.health_check_interval_min, r.health_check_interval_max))
-                })
-                db.commit()
+            except OperationalError as oe:
+                msg = str(oe).lower()
+                if 'no such column' in msg or 'has no column' in msg:
+                    print('OperationalError during health-check query, attempting auto-migrations...')
+                    try:
+                        run_auto_migrations(engine)
+                        # Close and reopen session to refresh metadata
+                        db.close()
+                        db = SessionLocal()
+                        query = db.query(Resource).filter(
+                            Resource.is_active == True, 
+                            Resource.is_health_check_enabled == True,
+                            Resource.next_health_check_at <= now
+                        )
+                    except Exception as mig_e:
+                        print(f'Auto-migration retry failed: {mig_e}')
+                        continue
+                else:
+                    # Unknown operational error, re-raise
+                    raise
+            for r in query.all():
+                # Prevent concurrent checks for the same resource using a file lock
+                lock = _acquire_resource_lock(r.id)
+                if not lock:
+                    # Skip this resource this cycle because another check is running
+                    continue
+                try:
+                    old_status = r.healthy
 
-                # Prune old logs
-                logs_to_keep_ids = [log_id for log_id, in db.query(HealthCheckLog.id).filter(HealthCheckLog.resource_id == r.id).order_by(HealthCheckLog.created_at.desc()).limit(5).all()]
-                if len(logs_to_keep_ids) >= 5:
-                    db.query(HealthCheckLog).filter(HealthCheckLog.resource_id == r.id, ~HealthCheckLog.id.in_(logs_to_keep_ids)).delete(synchronize_session=False)
+                    # Use the centralized perform_health_check which implements a
+                    # non-invasive 'simple' probe (TCP + OPTIONS/HEAD) and an
+                    # 'actual' POST-based probe depending on resource config.
+                    try:
+                        is_healthy, status_code, response_text = perform_health_check(r)
+                    except Exception as e:
+                        is_healthy = False
+                        status_code, response_text = None, str(e)
+
+                    # Create and save the log entry first
+                    new_log = HealthCheckLog(
+                        resource_id=r.id, is_success=is_healthy,
+                        status_code=status_code, response_text=response_text,
+                        method=(r.health_check_method or 'simple')
+                    )
+                    if old_status is True and is_healthy is False:
+                        email_sent = send_failure_notification(db, r)
+                        notification_status = []
+                        if email_sent:
+                            notification_status.append(f"email {email_sent}")
+                        webhook_sent = trigger_failure_webhook(r)
+                        if webhook_sent:
+                            notification_status.append(f"webhook {webhook_sent}")
+                        new_log.notification_status = ", ".join(notification_status)
+
+                    db.add(new_log)
                     db.commit()
+
+                    # Perform a direct, explicit UPDATE on the Resource table
+                    db.query(Resource).filter(Resource.id == r.id).update({
+                        "healthy": is_healthy,
+                        "last_checked": now,
+                        "latest_health_check_result": { "success": is_healthy, "status_code": status_code, "detail": response_text[:200] },
+                        "next_health_check_at": now + timedelta(seconds=random.randint(r.health_check_interval_min, r.health_check_interval_max))
+                    })
+                    db.commit()
+
+                    # Prune old logs
+                    logs_to_keep_ids = [log_id for log_id, in db.query(HealthCheckLog.id).filter(HealthCheckLog.resource_id == r.id).order_by(HealthCheckLog.created_at.desc()).limit(5).all()]
+                    if len(logs_to_keep_ids) >= 5:
+                        db.query(HealthCheckLog).filter(HealthCheckLog.resource_id == r.id, ~HealthCheckLog.id.in_(logs_to_keep_ids)).delete(synchronize_session=False)
+                        db.commit()
+                finally:
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_UN)
+                        lock.close()
+                    except Exception:
+                        pass
         finally:
             db.close()
 
@@ -828,7 +1155,9 @@ def dashboard(request: Request):
     for e in active_endpoints_query:
         active_endpoints_data.append({
             "path": e.path,
-            "status": get_endpoint_status(db, e)
+            "status": get_endpoint_status(db, e),
+            # indicate development mode so templates can render a badge
+            "is_dev": bool(getattr(e, 'is_development_mode', False) or getattr(e, 'dev_hold_tasks', False))
         })
 
     # Fetch recent tasks and stats (this logic is unchanged)
@@ -904,36 +1233,305 @@ def clients_view(request: Request, eid: int):
     if not endpoint:
         raise HTTPException(status_code=404)
     
-    clients = db.query(Client).filter(Client.endpoint_id == eid).order_by(Client.name).all()
-    
+    # Clients linked via the association table (EndpointClientLink)
+    linked_rows = db.query(EndpointClientLink).filter(EndpointClientLink.endpoint_id == eid).all()
+    linked_client_ids = [r.client_id for r in linked_rows] if linked_rows else []
+
+    if linked_client_ids:
+        associated_clients = db.query(Client).filter(Client.id.in_(linked_client_ids)).order_by(Client.name).all()
+        available_clients = db.query(Client).filter(~Client.id.in_(linked_client_ids)).order_by(Client.name).all()
+        # Serialize associated clients for safe JSON embedding in templates
+        associated_clients_serialized = [ {"id": c.id, "name": c.name, "token": c.token or ""} for c in associated_clients ]
+    else:
+        associated_clients = []
+        available_clients = db.query(Client).order_by(Client.name).all()
+
+    all_clients = db.query(Client).order_by(Client.name).all()
     context = {
         "request": request,
         "endpoint": endpoint,
-        "clients": clients
+        # pass both the model list (if needed) and a JSON-serializable copy for templates
+        "associated_clients": associated_clients_serialized if linked_client_ids else [],
+        "_associated_clients_models": associated_clients,
+        "available_clients": available_clients,
+        "all_clients": all_clients,
+        # keep backward-compatible 'clients' for other parts of the template
+        "clients": all_clients
     }
+    # Propagate optional error from query params so template can alert it
+    qerr = request.query_params.get('error')
+    if qerr:
+        context['error'] = qerr
     db.close()
     
     return templates.TemplateResponse("clients.html", context)
 
 @app.post("/endpoints/{eid}/clients/add", include_in_schema=False, dependencies=[Depends(verify_session)])
-def clients_add(eid: int, name: str = Form(...)):
+async def clients_add(eid: int, request: Request):
     db = SessionLocal()
-    new_client = Client(name=name, endpoint_id=eid, token=generate_token())
-    db.add(new_client)
-    db.commit()
+    form = await request.form()
+    # Read submitted client IDs (may be empty) and optional new client name
+    client_ids = form.getlist('client_ids') if hasattr(form, 'getlist') else []
+    name = form.get('name')
+
+    try:
+        # Replace existing links: remove all links for this endpoint, then add the submitted ones
+        db.query(EndpointClientLink).filter(EndpointClientLink.endpoint_id == eid).delete()
+
+        # Add links from submitted client_ids
+        for cid in client_ids:
+            try:
+                cid_i = int(cid)
+            except Exception:
+                continue
+            db.add(EndpointClientLink(endpoint_id=eid, client_id=cid_i))
+
+        # If a new client name was provided, create that client and link it as well
+        if name:
+            existing = db.query(Client).filter(Client.name == name).first()
+            if existing:
+                # If already exists, just link it
+                db.add(EndpointClientLink(endpoint_id=eid, client_id=existing.id))
+            else:
+                new_client = Client(name=name, token=generate_token(), endpoint_id=None)
+                db.add(new_client)
+                db.commit()
+                db.refresh(new_client)
+                db.add(EndpointClientLink(endpoint_id=eid, client_id=new_client.id))
+
+        db.commit()
+    finally:
+        db.close()
+
+    return RedirectResponse(f"/endpoints", status_code=303)
+
+
+@app.get("/clients", response_class=HTMLResponse, include_in_schema=False, dependencies=[Depends(verify_session)])
+def clients_list(request: Request):
+    db = SessionLocal()
+    clients = db.query(Client).order_by(Client.name).all()
+    # Build mapping of client_id -> list of endpoint paths
+    client_endpoints = {}
+    links = db.query(EndpointClientLink).all()
+    endpoint_ids = list({l.endpoint_id for l in links})
+    endpoints = {e.id: e for e in db.query(Endpoint).filter(Endpoint.id.in_(endpoint_ids)).all()} if endpoint_ids else {}
+    for l in links:
+        client_endpoints.setdefault(l.client_id, []).append(endpoints.get(l.endpoint_id).path if endpoints.get(l.endpoint_id) else str(l.endpoint_id))
+
+    context = {
+        "request": request,
+        "clients": clients,
+        "client_endpoints": client_endpoints
+    }
     db.close()
-    return RedirectResponse(f"/endpoints/{eid}/clients", status_code=303)
+    return templates.TemplateResponse("clients_list.html", context)
+
+
+@app.post('/clients/save', include_in_schema=False, dependencies=[Depends(verify_session)])
+async def client_save(request: Request):
+    form_data = await request.form()
+    db = SessionLocal()
+    try:
+        # Ensure historic DB schema (clients.endpoint_id) is nullable to avoid IntegrityError
+        try:
+            ensure_clients_endpoint_nullable(engine)
+        except Exception:
+            pass
+        cid = form_data.get('id')
+        name = form_data.get('name')
+        desc = form_data.get('description')
+        token = form_data.get('token') or generate_token()
+        endpoint_ids = form_data.getlist('endpoint_ids') if hasattr(form_data, 'getlist') else []
+
+        # Unique client name validation on create
+        if not cid:
+            existing = db.query(Client).filter(Client.name == name).first()
+            if existing:
+                db.close()
+                all_endpoints = db.query(Endpoint).order_by(Endpoint.path).all()
+                context = {
+                    'request': request,
+                    'client': None,
+                    'generated_token': token,
+                    'all_endpoints': [{'id': e.id, 'path': e.path} for e in all_endpoints],
+                    'linked_endpoint_ids': [],
+                    'error': f"Client with name '{name}' already exists."
+                }
+                return templates.TemplateResponse('client_form.html', context)
+
+        if cid:
+            client = db.query(Client).get(int(cid))
+            if not client:
+                raise HTTPException(404)
+            client.name = name
+            client.description = desc
+            client.token = token
+            db.commit()
+            client_id = client.id
+        else:
+            new_client = Client(name=name.strip(), token=token, endpoint_id=None, description=desc)
+            db.add(new_client)
+            db.commit()
+            db.refresh(new_client)
+            client_id = new_client.id
+
+        # Update EndpointClientLink associations
+        db.query(EndpointClientLink).filter(EndpointClientLink.client_id == client_id).delete()
+        for eid in endpoint_ids:
+            try:
+                eid_int = int(eid)
+            except Exception:
+                continue
+            db.add(EndpointClientLink(endpoint_id=eid_int, client_id=client_id))
+        db.commit()
+    finally:
+        db.close()
+
+    # If the form included a return_to field (used when creating from an endpoint), honor it
+    try:
+        form_return = form_data.get('return_to') if 'form_data' in locals() else None
+        if form_return:
+            return RedirectResponse(form_return, status_code=303)
+    except Exception:
+        pass
+
+    return RedirectResponse('/clients', status_code=303)
+
+
+@app.get('/clients/new', response_class=HTMLResponse, include_in_schema=False, dependencies=[Depends(verify_session)])
+def client_new_form(request: Request):
+    db = SessionLocal()
+    try:
+        all_endpoints = db.query(Endpoint).order_by(Endpoint.path).all()
+        # if caller provided an endpoint_id in query params (e.g. coming from /endpoints/<id>/clients),
+        # prefill that endpoint as linked for the new client
+        try:
+            endpoint_id = request.query_params.get('endpoint_id')
+            linked = []
+            if endpoint_id:
+                try:
+                    linked = [int(endpoint_id)]
+                except Exception:
+                    linked = []
+        except Exception:
+            linked = []
+        context = {
+            'request': request,
+            'client': None,
+            'generated_token': generate_token(),
+            'all_endpoints': [{'id': e.id, 'path': e.path} for e in all_endpoints],
+            'linked_endpoint_ids': linked
+        }
+        return templates.TemplateResponse('client_form.html', context)
+    finally:
+        db.close()
+
+
+@app.get('/clients/edit/{cid}', response_class=HTMLResponse, include_in_schema=False, dependencies=[Depends(verify_session)])
+def client_edit_form(request: Request, cid: int):
+    db = SessionLocal()
+    try:
+        client = db.query(Client).get(cid)
+        if not client:
+            raise HTTPException(404)
+        all_endpoints = db.query(Endpoint).order_by(Endpoint.path).all()
+        linked_ids = [l.endpoint_id for l in db.query(EndpointClientLink).filter(EndpointClientLink.client_id == cid).all()]
+        context = {
+            'request': request,
+            'client': client,
+            'generated_token': client.token,
+            'all_endpoints': [{'id': e.id, 'path': e.path} for e in all_endpoints],
+            'linked_endpoint_ids': linked_ids
+        }
+        return templates.TemplateResponse('client_form.html', context)
+    finally:
+        db.close()
+
+
+@app.post('/clients/save', include_in_schema=False, dependencies=[Depends(verify_session)])
+def client_save(request: Request):
+    form = request.form()
+    # Starlette's form() returns an awaitable; but using sync handler for simplicity
+    # We'll implement a simple sync-like handling: get form fields from Request._form if present
+    # To be safe, use request._form if available, otherwise raise.
+    try:
+        form_data = request._form
+    except Exception:
+        # Fallback: use awaitable - but since this is sync handler it's not ideal; raise for now
+        raise HTTPException(status_code=400, detail='Form submission not supported in sync handler')
+
+    db = SessionLocal()
+    try:
+        # Ensure historic DB schema (clients.endpoint_id) is nullable to avoid IntegrityError
+        try:
+            ensure_clients_endpoint_nullable(engine)
+        except Exception:
+            pass
+        cid = form_data.get('id')
+        name = form_data.get('name')
+        desc = form_data.get('description')
+        token = form_data.get('token') or generate_token()
+        endpoint_ids = form_data.getlist('endpoint_ids') if hasattr(form_data, 'getlist') else []
+
+        if cid:
+            client = db.query(Client).get(int(cid))
+            if not client:
+                raise HTTPException(404)
+            client.name = name
+            # store description in a tokenized manner if Client model lacks description column
+            try:
+                client.description = desc
+            except Exception:
+                pass
+            client.token = token
+            db.commit()
+            client_id = client.id
+        else:
+            new_client = Client(name=name.strip(), token=token, endpoint_id=None)
+            try:
+                new_client.description = desc
+            except Exception:
+                pass
+            db.add(new_client)
+            db.commit()
+            db.refresh(new_client)
+            client_id = new_client.id
+
+        # Update EndpointClientLink associations
+        db.query(EndpointClientLink).filter(EndpointClientLink.client_id == client_id).delete()
+        for eid in endpoint_ids:
+            try:
+                eid_int = int(eid)
+            except Exception:
+                continue
+            db.add(EndpointClientLink(endpoint_id=eid_int, client_id=client_id))
+        db.commit()
+    finally:
+        db.close()
+
+    # honor return_to if provided in the (possibly sync) form
+    try:
+        ret = None
+        if hasattr(form_data, 'get'):
+            ret = form_data.get('return_to')
+        if ret:
+            return RedirectResponse(ret, status_code=303)
+    except Exception:
+        pass
+
+    return RedirectResponse('/clients', status_code=303)
 
 @app.post("/clients/delete/{cid}", include_in_schema=False, dependencies=[Depends(verify_session)])
 def clients_delete(cid: int):
     db = SessionLocal()
     client = db.query(Client).get(cid)
     if client:
-        endpoint_id = client.endpoint_id
+        # Remove any association links first
+        db.query(EndpointClientLink).filter(EndpointClientLink.client_id == cid).delete()
         db.delete(client)
         db.commit()
         db.close()
-        return RedirectResponse(f"/endpoints/{endpoint_id}/clients", status_code=303)
+        return RedirectResponse(f"/clients", status_code=303)
     
     db.close()
     # Fallback redirect if client was already deleted
@@ -987,22 +1585,31 @@ async def endpoint_edit_and_rules_save(eid: int, request: Request, resource_orde
 @app.get("/endpoints/new", response_class=HTMLResponse, include_in_schema=False, dependencies=[Depends(verify_session)])
 def new_endpoint_form(request: Request):
     db = SessionLocal()
-    
-    # NEW: Check for resources before rendering the page
+
+    # Redirect the user to the resources page if none exist
     if db.query(Resource).count() == 0:
         db.close()
-        # Redirect the user to the resources page if none exist
         return RedirectResponse(url="/resources", status_code=303)
-        
+
     all_resources_query = db.query(Resource).order_by(Resource.name).all()
     all_resources_json_safe = [{"id": r.id, "name": r.name} for r in all_resources_query]
-    
+    # Fetch existing clients so the user can select or create clients when creating endpoint
+    all_clients_query = db.query(Client).order_by(Client.name).all()
+    all_clients_json_safe = [{"id": c.id, "name": c.name, "token": c.token} for c in all_clients_query]
+
     context = {
         "request": request,
-        "all_resources": all_resources_json_safe
+        "all_resources": all_resources_json_safe,
+        # default: include all resources for a new endpoint
+        "associated_resources": all_resources_json_safe,
+        "endpoint": None,
+        "edit_action": None,
+        "all_clients": all_clients_json_safe,
+        # For a new endpoint there are no associated clients yet
+        "associated_client_ids": []
     }
     db.close()
-    return templates.TemplateResponse("new_endpoint.html", context)
+    return templates.TemplateResponse("endpoint_form.html", context)
 
 @app.post("/endpoints/new", include_in_schema=False, dependencies=[Depends(verify_session)])
 async def new_endpoint_submit(
@@ -1016,11 +1623,36 @@ async def new_endpoint_submit(
     # Create the basic endpoint
     path = form_data.get("path").strip().lstrip("/").replace(" ", "_")
     required_params = form_data.getlist("required_params")
-    
+
+    # Unique validation for endpoint path
+    existing_ep = db.query(Endpoint).filter(Endpoint.path == path).first()
+    if existing_ep:
+        # prepare context similar to GET new endpoint form
+        all_resources_query = db.query(Resource).order_by(Resource.name).all()
+        all_resources_json_safe = [{"id": r.id, "name": r.name} for r in all_resources_query]
+        all_clients_query = db.query(Client).order_by(Client.name).all()
+        all_clients_json_safe = [{"id": c.id, "name": c.name, "token": c.token} for c in all_clients_query]
+        context = {
+            "request": request,
+            "all_resources": all_resources_json_safe,
+            "all_clients": all_clients_json_safe,
+            "associated_resources": all_resources_json_safe,
+            "endpoint": None,
+            "edit_action": None,
+            "associated_client_ids": [],
+            "error": f"An endpoint with path '{path}' already exists."
+        }
+        db.close()
+        return templates.TemplateResponse("endpoint_form.html", context)
+
+    # Server-side: always ensure 'ref' and 'scope' exist in stored required_params for new endpoints
+    final_required = sorted(list(set(['ref', 'scope'] + required_params)))
+
     new_endpoint = Endpoint(
         path=path,
         description=form_data.get("desc"),
-        required_params=sorted(list(set(['ref', 'scope'] + required_params)))
+        required_params=final_required,
+        dev_hold_tasks = True if form_data.get('dev_hold_tasks') else False
     )
     db.add(new_endpoint)
     db.commit()
@@ -1033,6 +1665,18 @@ async def new_endpoint_submit(
             link = EndpointResourceLink(endpoint_id=new_endpoint.id, resource_id=resource_id, sequence=i)
             db.add(link)
     
+    db.commit()
+
+    # --- Persist client associations (many-to-many) ---
+    client_ids = form_data.getlist('client_ids') if hasattr(form_data, 'getlist') else []
+    for cid in client_ids:
+        try:
+            cid_int = int(cid)
+        except Exception:
+            continue
+        link = EndpointClientLink(endpoint_id=new_endpoint.id, client_id=cid_int)
+        db.add(link)
+
     db.commit()
     new_id = new_endpoint.id
     db.close()
@@ -1096,19 +1740,19 @@ def rules_form(request: Request, eid: int):
 def toggle_dev_mode(eid: int, request: Request):
     db = SessionLocal()
     endpoint = db.query(Endpoint).get(eid)
+    new_state = False
     if endpoint:
         endpoint.is_development_mode = not endpoint.is_development_mode
+        new_state = bool(endpoint.is_development_mode)
         db.commit()
     db.close()
-
-    # Check the referrer to redirect back to the correct page
-    referer = request.headers.get("referer")
-    if referer and f"/endpoints/{eid}/rules" in referer:
-        # If the toggle was clicked on the rules page, stay there.
+    # If dev mode was just turned ON, redirect to the rules page so the user
+    # can immediately configure development rules for this endpoint.
+    if new_state:
         return RedirectResponse(f"/endpoints/{eid}/rules", status_code=303)
-    else:
-        # Otherwise, go back to the main endpoint list.
-        return RedirectResponse("/endpoints", status_code=303)
+
+    # Otherwise, return to the endpoints list (toggle was turned OFF)
+    return RedirectResponse("/endpoints", status_code=303)
     
 @app.post("/endpoints/{eid}/rules", include_in_schema=False, dependencies=[Depends(verify_session)])
 async def rules_save(eid: int, 
@@ -1118,7 +1762,31 @@ async def rules_save(eid: int,
     db = SessionLocal()
     try:
         form_data = await request.form()
-        
+
+        # --- Persist endpoint-level development flags ---
+        endpoint = db.query(Endpoint).get(eid)
+        if not endpoint:
+            db.close()
+            return RedirectResponse("/endpoints", status_code=303)
+
+        # Hidden input 'is_development_mode' is provided by the rules form (client-side toggle)
+        is_dev_val = form_data.get('is_development_mode')
+        endpoint.is_development_mode = True if is_dev_val in ['true', 'on', '1', 'True'] else False
+
+        # dev_hold_tasks and dev_rules_enabled are sent as checkboxes
+        endpoint.dev_hold_tasks = True if form_data.get('dev_hold_tasks') in ['true', 'on', '1', 'True'] else False
+        endpoint.dev_rules_enabled = True if form_data.get('dev_rules_enabled') in ['true', 'on', '1', 'True'] else False
+
+        # Server-side validation: Development Mode requires at least one of
+        # dev_hold_tasks or dev_rules_enabled to be enabled. If not, reject
+        # the change and redirect back with an error message.
+        if endpoint.is_development_mode and not (endpoint.dev_hold_tasks or endpoint.dev_rules_enabled):
+            db.close()
+            # Preserve `is_new` query parameter when redirecting if present
+            is_new_q = 'is_new=true' if form_data.get('is_new') else ''
+            q = f"?{is_new_q}&error=dev_requires_hold_or_rules" if is_new_q else "?error=dev_requires_hold_or_rules"
+            return RedirectResponse(f"/endpoints/{eid}/rules{q}", status_code=303)
+
         # --- Part 1: Save Parameter Mapping Rules ---
         db.query(ParameterRule).filter(ParameterRule.endpoint_id == eid).delete()
         
@@ -1141,7 +1809,7 @@ async def rules_save(eid: int,
                     )
                     db.add(rule)
         
-        # --- Part 2: Save Development Rules ---
+    # --- Part 2: Save Development Rules ---
         db.query(DevelopmentRule).filter(DevelopmentRule.endpoint_id == eid).delete()
         
         # Retrieve the lists of data submitted by the form
@@ -1163,6 +1831,7 @@ async def rules_save(eid: int,
                 )
                 db.add(dev_rule)
 
+        # Persist endpoint and rules
         db.commit()
     finally:
         db.close()
@@ -1216,6 +1885,30 @@ def tasks_list(status: Optional[str] = None, search: Optional[str] = None):
                   current_search=search)
 
 
+# Batch delete tasks (top-level route)
+@app.post("/tasks/batch_delete", include_in_schema=False, dependencies=[Depends(verify_session)])
+async def tasks_batch_delete(request: Request):
+    form = await request.form()
+    # form.getlist is available on Starlette's FormData
+    task_ids = form.getlist("task_ids") if hasattr(form, 'getlist') else [v for k, v in form.items() if k == 'task_ids']
+    if not task_ids:
+        return RedirectResponse("/tasks", status_code=303)
+    db = SessionLocal()
+    try:
+        for tid in task_ids:
+            try:
+                t = db.query(Task).get(int(tid))
+            except Exception:
+                t = None
+            if t:
+                db.delete(t)
+        db.commit()
+    finally:
+        db.close()
+    return RedirectResponse("/tasks", status_code=303)
+
+
+    
 # --- Resources ---
 @app.get("/resources", response_class=HTMLResponse,include_in_schema=False, dependencies=[Depends(verify_session)])
 def resources_view():
@@ -1224,8 +1917,28 @@ def resources_view():
     db.close()
     return render("resources.html", resources=resources)
 
+
+@app.get("/resources/new", response_class=HTMLResponse, include_in_schema=False, dependencies=[Depends(verify_session)])
+def resource_new_form(request: Request):
+    """Render the 'Create New Resource' form.
+
+    The POST handler for creating a resource already exists at /resources/new.
+    This GET handler simply renders the form template with sensible defaults so
+    a browser can fetch the form via GET instead of receiving 405 Method Not Allowed.
+    """
+    context = {
+        "request": request,
+        "resource": None,
+        "edit_action": "/resources/new",
+        # Defaults used by the template when creating a new resource
+        "default_subject": DEFAULT_FAILURE_EMAIL_SUBJECT,
+        "default_template": DEFAULT_FAILURE_EMAIL_TEMPLATE
+    }
+    return templates.TemplateResponse("resource_form.html", context)
+
 @app.post("/resources/edit/{rid}", include_in_schema=False, dependencies=[Depends(verify_session)])
 def resource_edit_submit(
+    request: Request,
     rid: int, 
     name: str = Form(...), 
     endpoint: str = Form(...), 
@@ -1234,6 +1947,7 @@ def resource_edit_submit(
     required_params: List[str] = Form([]),
     param_test_values: List[str] = Form([]),
     is_health_check_enabled: bool = Form(False),
+    health_check_method: str = Form('simple'),
     interval_min: int = Form(1),
     interval_max: int = Form(2),
     interval_unit: str = Form("minutes"),
@@ -1250,13 +1964,23 @@ def resource_edit_submit(
     r = db.query(Resource).get(rid)
     if not r:
         raise HTTPException(status_code=404, detail="Resource not found")
-    
+    # Unique name validation (allow same name if editing the same resource)
+    existing = db.query(Resource).filter(Resource.name == name, Resource.id != rid).first()
+    if existing:
+        # re-fetch resource for context
+        resource = db.query(Resource).get(rid)
+        context = {"request": request, "resource": resource, "error": f"Resource with name '{name}' already exists.", "default_subject": DEFAULT_FAILURE_EMAIL_SUBJECT, "default_template": DEFAULT_FAILURE_EMAIL_TEMPLATE.strip(), "edit_action": f"/resources/edit/{rid}"}
+        db.close()
+        return templates.TemplateResponse('resource_form.html', context)
+
     r.name = name
     r.endpoint = endpoint
     r.headers = {key: value for key, value in zip(header_keys, header_values) if key} or None
     r.required_params = required_params or None
     r.is_health_check_enabled = is_health_check_enabled
     r.health_check_test_values = {key: value for key, value in zip(required_params, param_test_values) if key and value} or None
+    # Persist selected health check method
+    r.health_check_method = health_check_method or r.health_check_method
     
     # These are the crucial lines for saving the interval.
     # They were likely missing or incorrect in your file.
@@ -1272,6 +1996,15 @@ def resource_edit_submit(
     r.failure_webhook_url = failure_webhook_url
     r.failure_webhook_headers = json.loads(failure_webhook_headers) if failure_webhook_headers and failure_webhook_headers.strip() else None
     r.failure_webhook_payload = json.loads(failure_webhook_payload) if failure_webhook_payload and failure_webhook_payload.strip() else None
+
+    # Server-side validation for edit: require test values when HC is enabled and method is 'actual'
+    if r.is_health_check_enabled and r.health_check_method == 'actual':
+        rp = required_params or []
+        tv = r.health_check_test_values or {}
+        missing = [p for p in rp if p and not tv.get(p)]
+        if missing:
+            db.close()
+            raise HTTPException(status_code=400, detail=f"Health check method 'actual' requires test values for parameters: {', '.join(missing)}")
     
     db.commit()
     db.close()
@@ -1289,31 +2022,76 @@ def resources_delete(rid: int):
     if r: db.delete(r); db.commit()
     db.close(); return RedirectResponse("/resources", status_code=303)
 
-@app.get("/resources/new", response_class=HTMLResponse, include_in_schema=False, dependencies=[Depends(verify_session)])
-def new_resource_form(request: Request):
-    context = {
-        "request": request,
-        "default_subject": DEFAULT_FAILURE_EMAIL_SUBJECT,
-        "default_template": DEFAULT_FAILURE_EMAIL_TEMPLATE.strip()
-    }
-    return templates.TemplateResponse("new_resource.html", context)
+
+@app.post("/resources/duplicate/{rid}", include_in_schema=False, dependencies=[Depends(verify_session)])
+def resources_duplicate(rid: int):
+    """
+    Duplicate a resource (copy all fields except health-check related data).
+    The new resource will be created with is_active=False and a unique name.
+    """
+    db = SessionLocal()
+    src = db.query(Resource).get(rid)
+    if not src:
+        db.close()
+        return RedirectResponse(url="/resources", status_code=303)
+
+    # Base name for the copy
+    base_name = f"{src.name} copy"
+    new_name = base_name
+    suffix = 1
+    # Ensure uniqueness
+    while db.query(Resource).filter(Resource.name == new_name).first():
+        suffix += 1
+        new_name = f"{base_name} {suffix}"
+
+    # Create a new Resource object copying fields except health-check specific ones
+    # NOTE: We intentionally DO NOT copy any health-check history/logs.
+    # Health check logs are stored in the HealthCheckLog table and should
+    # not be duplicated when cloning a resource.
+    new_res = Resource(
+        name=new_name,
+        endpoint=src.endpoint,
+        headers=src.headers,
+        required_params=src.required_params,
+        is_active=False,
+        healthy=False,
+        is_health_check_enabled=False,
+        health_check_test_values=None,
+        health_check_method='simple',
+        health_check_interval_min=src.health_check_interval_min or 60,
+        health_check_interval_max=src.health_check_interval_max or 90,
+        notification_email=src.notification_email,
+        notification_subject=src.notification_subject,
+        notification_template=src.notification_template,
+        send_failure_email=src.send_failure_email,
+        send_failure_webhook=src.send_failure_webhook,
+        failure_webhook_url=src.failure_webhook_url,
+        failure_webhook_headers=src.failure_webhook_headers,
+        failure_webhook_payload=src.failure_webhook_payload
+    )
+    db.add(new_res)
+    db.commit()
+    db.close()
+    return RedirectResponse(url="/resources", status_code=303)
+
 
 @app.post("/resources/new", include_in_schema=False, dependencies=[Depends(verify_session)])
-def new_resource_submit(
-    name: str = Form(...), 
-    endpoint: str = Form(...), 
+def resources_new_submit(
+    request: Request,
+    name: str = Form(...),
+    endpoint: str = Form(...),
     header_keys: List[str] = Form([]),
     header_values: List[str] = Form([]),
     required_params: List[str] = Form([]),
     param_test_values: List[str] = Form([]),
     is_health_check_enabled: bool = Form(False),
+    health_check_method: str = Form('simple'),
     interval_min: int = Form(1),
     interval_max: int = Form(2),
     interval_unit: str = Form("minutes"),
     notification_email: Optional[str] = Form(None),
     notification_subject: Optional[str] = Form(None),
     notification_template: Optional[str] = Form(None),
-    # --- ADDED FIELDS ---
     send_failure_email: bool = Form(False),
     send_failure_webhook: bool = Form(False),
     failure_webhook_url: Optional[str] = Form(None),
@@ -1327,22 +2105,53 @@ def new_resource_submit(
         
     headers_dict = {key: value for key, value in zip(header_keys, header_values) if key}
     test_values_dict = {key: value for key, value in zip(required_params, param_test_values) if key and value}
-    
+
+    # Server-side validation: if health check is enabled and method is 'actual', require test values for all required params
+    if is_health_check_enabled and health_check_method == 'actual':
+        missing = [p for p in (required_params or []) if p and not test_values_dict.get(p)]
+        if missing:
+            db.close()
+            raise HTTPException(status_code=400, detail=f"Health check method 'actual' requires test values for parameters: {', '.join(missing)}")
+
+    # Quick endpoint validity check: choose method based on requested health_check_method
+    healthy = False
+    last_checked = None
+    next_health = None
+    try:
+        if health_check_method == 'actual' and test_values_dict:
+            temp_res = Resource(
+                name=name,
+                endpoint=endpoint,
+                headers=headers_dict or None,
+                health_check_test_values=test_values_dict or None
+            )
+            healthy, status_code, resp_text = perform_health_check(temp_res)
+        else:
+            resp = requests.get(endpoint, headers=headers_dict or None, timeout=5)
+            healthy = 200 <= resp.status_code < 300
+    except Exception:
+        healthy = False
+    last_checked = datetime.utcnow()
+    if is_health_check_enabled:
+        next_health = datetime.utcnow()
+
     r = Resource(
-        name=name, 
-        endpoint=endpoint, 
+        name=name,
+        endpoint=endpoint,
         headers=headers_dict or None,
-        required_params=required_params or None, 
-        is_active=True, 
-        healthy=True,
+        required_params=required_params or None,
+        is_active=True,
+        healthy=healthy,
+        last_checked=last_checked,
         is_health_check_enabled=is_health_check_enabled,
         health_check_test_values=test_values_dict or None,
+        health_check_method=health_check_method,
         health_check_interval_min=min_seconds,
         health_check_interval_max=max_seconds,
-        next_health_check_at=datetime.utcnow(),
+        next_health_check_at=next_health,
         notification_email=notification_email,
         notification_subject=notification_subject or DEFAULT_FAILURE_EMAIL_SUBJECT,
-        notification_template=notification_template or DEFAULT_EMAIL_TEMPLATE,
+    notification_template=notification_template or DEFAULT_FAILURE_EMAIL_TEMPLATE,
         # --- ADDED LOGIC ---
         send_failure_email=send_failure_email,
         send_failure_webhook=send_failure_webhook,
@@ -1350,6 +2159,20 @@ def new_resource_submit(
         failure_webhook_headers=json.loads(failure_webhook_headers) if failure_webhook_headers and failure_webhook_headers.strip() else None,
         failure_webhook_payload=json.loads(failure_webhook_payload) if failure_webhook_payload and failure_webhook_payload.strip() else None
     )
+    # Unique resource name validation
+    existing_res = db.query(Resource).filter(Resource.name == name).first()
+    if existing_res:
+        db.close()
+        context = {
+            "request": request,
+            "resource": None,
+            "error": f"Resource with name '{name}' already exists.",
+            "default_subject": DEFAULT_FAILURE_EMAIL_SUBJECT,
+            "default_template": DEFAULT_FAILURE_EMAIL_TEMPLATE.strip(),
+            "edit_action": "/resources/new"
+        }
+        return templates.TemplateResponse('resource_form.html', context)
+
     db.add(r)
     db.commit()
     db.close()
@@ -1384,7 +2207,9 @@ def resource_edit_form(request: Request, rid: int):
         "default_template": DEFAULT_FAILURE_EMAIL_TEMPLATE.strip()
     }
     db.close()
-    return templates.TemplateResponse("edit_resource.html", context)
+    # Provide the action URL for the edit form
+    context["edit_action"] = f"/resources/edit/{resource.id}"
+    return templates.TemplateResponse("resource_form.html", context)
 
 @app.get("/resources/{resource_id}/details", include_in_schema=False, dependencies=[Depends(verify_session)])
 def get_resource_details(resource_id: int):
@@ -1410,50 +2235,164 @@ def resource_history(rid: int):
 
 @app.post("/resources/{rid}/check", include_in_schema=False, dependencies=[Depends(verify_session)])
 def manual_health_check(rid: int):
+    request_id = str(uuid.uuid4())
     db = SessionLocal()
     try:
         resource = db.query(Resource).get(rid)
         if not resource:
             raise HTTPException(status_code=404, detail="Resource not found")
-        
-        is_healthy, status_code, response_text = perform_health_check(resource)
 
-        # Create and save the log entry first
-        new_log = HealthCheckLog(
-            resource_id=resource.id, is_success=is_healthy, 
-            status_code=status_code, response_text=response_text
-        )
-        if not is_healthy:
-            email_sent = send_failure_notification(db, resource)
-            notification_status = []
-            if email_sent:
-                notification_status.append(f"email {email_sent}")
-            webhook_sent = trigger_failure_webhook(resource)
-            if webhook_sent:
-                notification_status.append(f"webhook {webhook_sent}")
-            new_log.notification_status = ", ".join(notification_status)
-        db.add(new_log)
-        db.commit()
+        print(f"manual_check start: rid={rid} request_id={request_id}")
 
-        # --- THIS IS THE FIX ---
-        # Perform a direct, explicit UPDATE on the Resource table.
-        # This bypasses any stale session state issues.
-        db.query(Resource).filter(Resource.id == rid).update({
-            "healthy": is_healthy,
-            "last_checked": datetime.utcnow(),
-            "latest_health_check_result": { "success": is_healthy, "status_code": status_code, "detail": response_text[:200] },
-            "next_health_check_at": datetime.utcnow() + timedelta(seconds=random.randint(resource.health_check_interval_min, resource.health_check_interval_max))
-        })
-        db.commit()
-        # ----------------------
+        # In-memory short-lived guard: if a manual check for this resource started recently, reject
+        now = time.time()
+        guard = manual_check_locks.get(rid)
+        if guard and now - guard < 2.0:
+            # Return both 'detail' and 'message' for compatibility with client JS
+            return JSONResponse({
+                'success': None,
+                'detail': 'check already running',
+                'message': 'check already running',
+                'request_id': request_id
+            }, status_code=409)
 
-        # Prune old logs
-        logs_to_keep_ids = [log_id for log_id, in db.query(HealthCheckLog.id).filter(HealthCheckLog.resource_id == rid).order_by(HealthCheckLog.created_at.desc()).limit(5).all()]
-        if len(logs_to_keep_ids) >= 5:
-            db.query(HealthCheckLog).filter(HealthCheckLog.resource_id == rid, ~HealthCheckLog.id.in_(logs_to_keep_ids)).delete(synchronize_session=False)
+        # Attempt to acquire per-resource file lock non-blocking; if not acquired, another check is running
+        lock_fh = _acquire_resource_lock(rid)
+        if not lock_fh:
+            # can't get lock
+            manual_check_locks[rid] = now
+            print(f"manual_check lock failed: rid={rid} request_id={request_id}")
+            # Return both 'detail' and 'message' so client code can display a helpful message
+            return JSONResponse({
+                'success': None,
+                'detail': 'check already running (lock)',
+                'message': 'check already running (lock)',
+                'request_id': request_id
+            }, status_code=409)
+
+        # mark in-memory guard while we run
+        manual_check_locks[rid] = now
+        try:
+            # Respect the resource's configured health_check_method for manual checks
+            method_used = (resource.health_check_method or 'simple')
+            if method_used == 'simple':
+                # First, use the lightweight non-invasive probe (TCP + OPTIONS/HEAD)
+                try:
+                    is_healthy, status_code, response_text = perform_health_check(resource)
+                except Exception as e:
+                    is_healthy, status_code, response_text = False, None, str(e)
+
+                # If the user explicitly wants to confirm by making a request, do a minimal POST probe
+                # This will not be used to mark the resource healthy unless it returns 2xx.
+                try:
+                    probe_headers = (resource.headers.copy() if resource.headers else {})
+                    # Ensure a content-type for the probe
+                    if not any(k.lower() == 'content-type' for k in probe_headers.keys()):
+                        probe_headers['Content-Type'] = 'application/json'
+
+                    probe_payload = resource.health_check_test_values if resource.health_check_test_values is not None else {}
+                    # Ensure probe_payload is a dict; fall back to {}
+                    if not isinstance(probe_payload, dict):
+                        probe_payload = {}
+
+                    # Create a sanitized dummy payload: replace potentially side-effecting values
+                    def _sanitize_value(v):
+                        if isinstance(v, str):
+                            # Replace likely phone numbers with a neutral numeric placeholder
+                            if re.match(r"^\+?\d{6,}$", v):
+                                return "0000000000"
+                            # Avoid returning long text or service-specific samples — use a short generic placeholder
+                            if len(v) > 200:
+                                return "dummy_string"
+                            return "dummy_string"
+                        elif isinstance(v, (int, float)):
+                            return 0
+                        elif isinstance(v, dict):
+                            return {k: _sanitize_value(val) for k, val in v.items()}
+                        elif isinstance(v, list):
+                            return [_sanitize_value(x) for x in v]
+                        else:
+                            return str(v)
+
+                    sanitized_payload = {k: _sanitize_value(v) for k, v in probe_payload.items()} if probe_payload else {}
+
+                    # Add marker header to indicate this is a dummy health-check probe
+                    probe_headers['X-Health-Check'] = 'dummy'
+
+                    resp_probe = requests.post(resource.endpoint, headers=probe_headers, json=sanitized_payload, timeout=8)
+                    probe_code = getattr(resp_probe, 'status_code', None)
+                    probe_text = getattr(resp_probe, 'text', '')
+
+                    # Attach probe result to response_text for visibility
+                    response_text = (response_text or '') + f"\nPOST-probe:{probe_code}:{probe_text[:1000]}"
+                    # Only mark healthy if probe returned 2xx (do not auto-promote on 3xx/4xx/5xx)
+                    if 200 <= probe_code < 300:
+                        is_healthy = True
+                        status_code = probe_code
+                    else:
+                        # prefer to show the actual probe status code if available
+                        status_code = probe_code or status_code
+                except Exception as e:
+                    # If probe failed, append the error but keep prior probe results
+                    response_text = (response_text or '') + f"\nPOST-probe-error:{str(e)}"
+            else:
+                is_healthy, status_code, response_text = perform_health_check(resource)
+
+            # Create and save the log entry first
+            new_log = HealthCheckLog(
+                resource_id=resource.id, is_success=is_healthy,
+                status_code=status_code, response_text=response_text,
+                method=method_used
+            )
+            if not is_healthy:
+                email_sent = send_failure_notification(db, resource)
+                notification_status = []
+                if email_sent:
+                    notification_status.append(f"email {email_sent}")
+                webhook_sent = trigger_failure_webhook(resource)
+                if webhook_sent:
+                    notification_status.append(f"webhook {webhook_sent}")
+                new_log.notification_status = ", ".join(notification_status)
+            db.add(new_log)
             db.commit()
-        
-        return { "success": is_healthy, "status_code": status_code, "detail": response_text[:200] }
+            try:
+                print(f"manual_check saved log: rid={rid} request_id={request_id} log_id={new_log.id}")
+            except Exception:
+                print(f"manual_check saved log (id unknown): rid={rid} request_id={request_id}")
+
+            # --- Update Resource summary explicitly ---
+            db.query(Resource).filter(Resource.id == rid).update({
+                "healthy": is_healthy,
+                "last_checked": datetime.utcnow(),
+                "latest_health_check_result": { "success": is_healthy, "status_code": status_code, "detail": response_text[:200] },
+                "next_health_check_at": datetime.utcnow() + timedelta(seconds=random.randint(resource.health_check_interval_min, resource.health_check_interval_max))
+            })
+            db.commit()
+
+            # Prune old logs
+            logs_to_keep_ids = [log_id for log_id, in db.query(HealthCheckLog.id).filter(HealthCheckLog.resource_id == rid).order_by(HealthCheckLog.created_at.desc()).limit(5).all()]
+            if logs_to_keep_ids:
+                db.query(HealthCheckLog).filter(HealthCheckLog.resource_id == rid, ~HealthCheckLog.id.in_(logs_to_keep_ids)).delete(synchronize_session=False)
+                db.commit()
+
+            return JSONResponse({ "success": is_healthy, "status_code": status_code, "detail": response_text[:200], 'request_id': request_id })
+        finally:
+            # release file lock
+            try:
+                lock_fh.close()
+            except Exception:
+                pass
+            # clear in-memory guard after a short delay
+            def _clear_guard(rid_local):
+                try:
+                    time.sleep(1.0)
+                except Exception:
+                    pass
+                manual_check_locks.pop(rid_local, None)
+
+            t = Thread(target=_clear_guard, args=(rid,))
+            t.daemon = True
+            t.start()
     finally:
         db.close()
 
@@ -1519,10 +2458,13 @@ def endpoint_edit_form(request: Request, eid: int):
         "request": request,
         "endpoint": endpoint,
         "associated_resources": associated_resources_json_safe,
-        "all_resources": all_resources_json_safe # Pass the complete list
+        "all_resources": all_resources_json_safe,
+        "edit_action": f"/endpoints/edit/{endpoint.id}",
+        "all_clients": [{"id": c.id, "name": c.name, "token": c.token} for c in db.query(Client).order_by(Client.name).all()],
+        "associated_client_ids": [l.client_id for l in db.query(EndpointClientLink).filter(EndpointClientLink.endpoint_id == eid).all()]
     }
     db.close()
-    return templates.TemplateResponse("edit_endpoint.html", context)
+    return templates.TemplateResponse("endpoint_form.html", context)
 
 @app.post("/endpoints/edit/{eid}", include_in_schema=False, dependencies=[Depends(verify_session)])
 async def endpoint_edit_save(
@@ -1540,7 +2482,8 @@ async def endpoint_edit_save(
     endpoint.path = form_data.get("path").strip().lstrip("/").replace(" ", "_")
     endpoint.description = form_data.get("desc")
     required_params = form_data.getlist("required_params")
-    endpoint.required_params = sorted(list(set(['ref', 'scope'] + required_params)))
+    # For edit: persist exactly what user provided (allow removing ref/scope)
+    endpoint.required_params = required_params or []
 
     # Rebuild Resource Links based on the new sequence
     db.query(EndpointResourceLink).filter(EndpointResourceLink.endpoint_id == eid).delete()
@@ -1549,6 +2492,19 @@ async def endpoint_edit_save(
             link = EndpointResourceLink(endpoint_id=eid, resource_id=resource_id, sequence=i)
             db.add(link)
     
+    # --- Update client associations: only update if the form included client selection ---
+    # If the edit form did not include 'client_ids' (for example when only
+    # reordering resources), preserve the existing client links.
+    if 'client_ids' in form_data:
+        db.query(EndpointClientLink).filter(EndpointClientLink.endpoint_id == eid).delete()
+        client_ids = form_data.getlist('client_ids') if hasattr(form_data, 'getlist') else []
+        for cid in client_ids:
+            try:
+                cid_int = int(cid)
+            except Exception:
+                continue
+            db.add(EndpointClientLink(endpoint_id=eid, client_id=cid_int))
+
     db.commit()
     db.close()
     return RedirectResponse("/endpoints", status_code=303)
@@ -1566,8 +2522,8 @@ def endpoints_delete(eid: int):
             
             print(f"Deleting endpoint {eid} and all associated data...")
 
-            # Delete all associated clients
-            db.query(Client).filter(Client.endpoint_id == eid).delete(synchronize_session=False)
+            # Delete all association links between this endpoint and clients
+            db.query(EndpointClientLink).filter(EndpointClientLink.endpoint_id == eid).delete(synchronize_session=False)
 
             # Delete all associated parameter mapping rules
             db.query(ParameterRule).filter(ParameterRule.endpoint_id == eid).delete(synchronize_session=False)
@@ -1620,15 +2576,6 @@ def rules_view(endpoint_id: int):
                   required_keys=required_keys, 
                   existing_rules_map=existing_rules_map)
 
-# This replaces the old /rules/add and /rules/delete routes
-@app.post("/rules/{endpoint_id}/save",include_in_schema=False, dependencies=[Depends(verify_session)])
-async def rules_save(endpoint_id: int, request: Request):
-    db = SessionLocal()
-    endpoint = db.query(Endpoint).get(endpoint_id)
-    if not endpoint:
-        raise HTTPException(404)
-
-    form_data = await request.form()
     
     # Determine the required keys from the linked resource
     required_keys = []
@@ -1800,9 +2747,15 @@ async def api_dynamic(
         if not x_api_token:
             raise HTTPException(status_code=401, detail="API token is missing")
 
-        client = db.query(Client).filter(Client.token == x_api_token, Client.endpoint_id == endpoint.id).first()
+        # Validate token against clients linked to this endpoint via the association table
+        client = db.query(Client).join(EndpointClientLink, Client.id == EndpointClientLink.client_id)\
+            .filter(Client.token == x_api_token, EndpointClientLink.endpoint_id == endpoint.id).first()
         if not client:
-            raise HTTPException(status_code=403, detail="Invalid API token for this endpoint")
+            # Fallback for legacy single-column clients.endpoint_id for older DBs
+            legacy_client = db.query(Client).filter(Client.token == x_api_token, Client.endpoint_id == endpoint.id).first()
+            if not legacy_client:
+                raise HTTPException(status_code=403, detail="Invalid API token for this endpoint")
+            client = legacy_client
 
         ref_id = payload.get("ref")
         scope = payload.get("scope")
@@ -1815,9 +2768,20 @@ async def api_dynamic(
                     raise HTTPException(status_code=400, detail=f"Missing required parameter: {required_key}")
         
         # Get the global max_retries setting from the database
-        max_retries = int(get_setting(db, "max_failure_attempts", 5))
-        delay = random.randint(int(get_setting(db, "task_delay_min", 1)), int(get_setting(db, "task_delay_max", 5)))
-        # Create the task in a 'pending' state. The worker will assign the resource later.
+        max_retries = get_setting_int(db, "max_failure_attempts", 5)
+        min_delay = get_setting_int(db, "task_delay_min", 1)
+        max_delay = get_setting_int(db, "task_delay_max", 5)
+        # Ensure we have a valid range for randint
+        if max_delay < min_delay:
+            max_delay = min_delay
+        delay = random.randint(min_delay, max_delay)
+        # Create the task in a 'pending' state by default. However, when the
+        # endpoint is in development mode and configured to hold tasks for
+        # testing, mark it as 'dev' so workers won't process it.
+        initial_status = "pending"
+        if endpoint.is_development_mode and getattr(endpoint, 'dev_hold_tasks', False):
+            initial_status = "dev"
+
         t = Task(
             endpoint_id=endpoint.id, 
             endpoint_path=endpoint.path, 
@@ -1825,9 +2789,9 @@ async def api_dynamic(
             client_name=client.name, 
             ref_id=ref_id, 
             scope=scope,
-            status="pending", # Always starts as pending
-            attempts=0, # Start at -1 so the first check looks for sequence 0
-            retry_count=0, # Initialize retry count
+            status=initial_status,
+            attempts=0,
+            retry_count=0,
             max_retries=max_retries,
             delay=delay,
         )

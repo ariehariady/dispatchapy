@@ -1,0 +1,260 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="bg-white p-6 rounded shadow ">
+        <h2 class="text-lg font-semibold mb-4">{% if endpoint %}Edit Endpoint: /api/{{ endpoint.path }}{% else %}Create New Endpoint{% endif %}</h2>
+        {% if error %}
+            <script>try { alert({{ error | tojson | safe }}); } catch(e) { console.error('alert error', e); }</script>
+        {% endif %}
+    <form method="post" action="{{ edit_action if endpoint else '/endpoints/new' }}" id="endpoint-form" novalidate>
+        <!-- Section 1: Endpoint Details -->
+        <div class="grid grid-cols-1 gap-4 border-b pb-4">
+            <div>
+                <label class="text-sm font-medium">Endpoint Path</label>
+                <input name="path" class="p-2 border rounded w-full mt-1" value="{{ endpoint.path if endpoint else '' }}" placeholder="e.g. send_invoice_reminder" />
+            </div>
+            <div>
+                <label class="text-sm font-medium">Description</label>
+                <input name="desc" class="p-2 border rounded w-full mt-1" value="{{ endpoint.description or '' if endpoint else '' }}" placeholder="Optional description of this endpoint" />
+            </div>
+            <div class="border p-3 rounded">
+                <label class="text-sm font-medium">Required Incoming Parameters</label>
+                <p class="text-xs text-gray-500 mt-1">Define parameters the client must send. `ref` and `scope` are suggested defaults (you may remove them).</p>
+                <div id="incoming-params-container" class="mt-2 space-y-2"></div>
+                <div class="flex items-center gap-2 mt-3 pt-3 border-t">
+                    <input type="text" id="new-incoming-param-name" placeholder="Add custom parameter..." class="p-2 border rounded flex-grow">
+                    <button type="button" id="add-incoming-param-btn" class="px-3 py-2 bg-gray-600 text-white rounded w-20">Add</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Development options moved to rules form -->
+
+        <!-- Section 2: Resource Association -->
+        <div class="border p-3 rounded mt-4">
+            <label class="text-sm font-medium">Associated Resources (Failover Sequence)</label>
+            <p class="text-xs text-gray-500 mt-1">Drag the handle (&#9776;) to reorder the failover priority. The top resource is tried first.</p>
+            <div id="resources-container" class="mt-2 space-y-2"></div>
+            <div id="resource-adder" class="flex items-center gap-2 mt-3 pt-3 border-t">
+                <select id="available-resource-select" class="p-2 border rounded flex-grow"></select>
+                <button type="button" id="add-resource-btn" class="px-3 py-2 bg-gray-600 text-white rounded w-20">Add</button>
+            </div>
+        </div>
+        <!-- Clients are managed on the Clients page; removed inline client management from this form -->
+
+        <div class="flex justify-end items-center space-x-3 border-t pt-4 mt-6">
+            <a href="/endpoints" class="px-4 py-2 bg-gray-200 text-gray-800 rounded">Cancel</a>
+            <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded">{% if endpoint %}Save Changes{% else %}Save and Configure Rules{% endif %}</button>
+        </div>
+    </form>
+</div>
+<script>
+    const incomingParamsContainer = document.getElementById('incoming-params-container');
+    const newIncomingParamNameInput = document.getElementById('new-incoming-param-name');
+    const addIncomingParamBtn = document.getElementById('add-incoming-param-btn');
+    const resourcesContainer = document.getElementById('resources-container');
+    const addResourceBtn = document.getElementById('add-resource-btn');
+    const availableSelect = document.getElementById('available-resource-select');
+    const resourceAdder = document.getElementById('resource-adder');
+    const allResources = {{ all_resources | tojson | safe }};
+    const initialAssociatedResources = {{ associated_resources | tojson | safe }};
+    const existingIncomingParams = {% if endpoint and endpoint.required_params %}{{ endpoint.required_params | tojson | safe }}{% else %}null{% endif %};
+
+    function createIncomingParamRow(paramName) {
+        if (!paramName) return;
+        const row = document.createElement('div');
+        row.className = 'flex items-center gap-2';
+        row.innerHTML = `<input type="hidden" name="required_params" value="${paramName}"><input type="text" value="${paramName}" class="p-2 border rounded bg-gray-100 flex-grow" readonly><button type="button" class="px-3 py-2 bg-red-600 text-white rounded w-20 flex-shrink-0" onclick="this.parentElement.remove()">Remove</button>`;
+        incomingParamsContainer.appendChild(row);
+    }
+    addIncomingParamBtn.addEventListener('click', () => {
+        const val = newIncomingParamNameInput.value.trim();
+        if (!val) return;
+        createIncomingParamRow(val);
+        newIncomingParamNameInput.value = '';
+    });
+    
+    function createResourceRow(resourceId, resourceName) {
+        const row = document.createElement('div');
+        row.className = 'flex items-center gap-2 p-2 bg-gray-50 rounded border';
+        row.dataset.resourceId = resourceId;
+        row.innerHTML = `
+            <span class="cursor-grab text-gray-400" style="font-size: 1.2rem; line-height: 1;">&#9776;</span>
+            <input type="hidden" name="resource_sequence" value="${resourceId}">
+            <input type="text" class="p-2 border rounded bg-gray-100 flex-grow" value="${resourceName}" readonly>
+            <button type="button" class="px-3 py-2 bg-red-600 text-white rounded w-20 flex-shrink-0" onclick="removeResource(this, ${resourceId}, '${resourceName}')">Remove</button>
+        `;
+        resourcesContainer.appendChild(row);
+    }
+
+    function updateAvailableResourcesDropdown() {
+        const associatedIds = new Set(Array.from(resourcesContainer.querySelectorAll('[data-resource-id]')).map(el => el.dataset.resourceId));
+        availableSelect.innerHTML = '<option value="">-- Select a resource to add --</option>';
+        allResources.forEach(res => {
+            if (!associatedIds.has(String(res.id))) {
+                availableSelect.innerHTML += `<option value="${res.id}">${res.name}</option>`;
+            }
+        });
+        resourceAdder.style.display = availableSelect.options.length > 1 ? 'flex' : 'none';
+    }
+
+    function removeResource(button, resourceId, resourceName) {
+        button.parentElement.remove();
+        updateAvailableResourcesDropdown();
+    }
+
+    addResourceBtn.addEventListener('click', () => {
+        const selectedId = availableSelect.value;
+        if (!selectedId) return;
+        const selectedName = availableSelect.options[availableSelect.selectedIndex].text;
+        createResourceRow(selectedId, selectedName);
+        updateAvailableResourcesDropdown();
+    });
+
+    new Sortable(resourcesContainer, { animation: 150, handle: '.cursor-grab', ghostClass: 'bg-blue-100' });
+
+    // Validation: ensure at least one associated resource and at least one required param
+    const endpointForm = document.getElementById('endpoint-form');
+    if (endpointForm) {
+        // Helper to mark invalid inputs and attach focus/blur behavior
+        function markInvalid(el) {
+            if (!el) return;
+            el.classList.add('border-red-600', 'ring-2', 'ring-red-200');
+            const onFocus = function() {
+                el.classList.remove('border-red-600', 'ring-2', 'ring-red-200');
+                el.classList.add('ring-2', 'ring-blue-400');
+                el.removeEventListener('focus', onFocus);
+                el.addEventListener('blur', function() { el.classList.remove('ring-2', 'ring-blue-400'); }, { once: true });
+            };
+            el.addEventListener('focus', onFocus);
+        }
+
+        // Attach focus handlers to inputs/selects to show blue focus ring
+        endpointForm.querySelectorAll('input, select, textarea').forEach(el => {
+            el.addEventListener('focus', () => el.classList.add('ring-2', 'ring-blue-400'));
+            el.addEventListener('blur', () => el.classList.remove('ring-2', 'ring-blue-400'));
+        });
+
+        endpointForm.addEventListener('submit', function(e) {
+            // Clear previous highlights
+            endpointForm.querySelectorAll('.border-red-600').forEach(el => el.classList.remove('border-red-600'));
+
+            const resourceRows = resourcesContainer.querySelectorAll('[data-resource-id]');
+            const paramRows = incomingParamsContainer.querySelectorAll('input[name="required_params"]');
+            const pathInput = endpointForm.querySelector('input[name="path"]');
+            const invalidEls = [];
+
+            if (!resourceRows || resourceRows.length === 0) {
+                // highlight the resource selector
+                invalidEls.push(availableSelect);
+            }
+
+            if (!paramRows || paramRows.length === 0) {
+                invalidEls.push(newIncomingParamNameInput);
+            }
+
+            // Validate path (non-empty)
+            if (!pathInput || !pathInput.value || !String(pathInput.value).trim()) {
+                invalidEls.push(pathInput);
+            }
+
+            if (invalidEls.length > 0) {
+                e.preventDefault();
+                // mark all invalids (do not programmatically focus any)
+                invalidEls.forEach(el => markInvalid(el));
+                const firstInvalid = endpointForm.querySelector('.border-red-600');
+                if (firstInvalid) firstInvalid.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                return false;
+            }
+        });
+    }
+
+    // Pre-population logic: if editing, use endpoint.required_params and associated_resources;
+    // if creating new endpoint, pre-populate suggested keys and add all resources by default.
+    if (existingIncomingParams) {
+        existingIncomingParams.forEach(param => createIncomingParamRow(param));
+    } else {
+        // suggested defaults (removable)
+        createIncomingParamRow('ref');
+        createIncomingParamRow('scope');
+    }
+
+    if (initialAssociatedResources && initialAssociatedResources.length > 0) {
+        initialAssociatedResources.forEach(res => createResourceRow(res.id, res.name));
+    } else if (allResources && allResources.length > 0) {
+        // Default: add all available resources to new endpoint
+        allResources.forEach(res => createResourceRow(res.id, res.name));
+    }
+    updateAvailableResourcesDropdown();
+</script>
+<script>
+    // Client row creation/removal helpers
+    const clientsContainer = document.getElementById('clients-container');
+    const availableClientSelect = document.getElementById('available-client-select');
+    const addClientBtn = document.getElementById('add-client-btn');
+
+    function createClientRow(clientId, clientName) {
+        if (!clientId) return;
+        // Prevent duplicates
+        if (Array.from(clientsContainer.querySelectorAll('[data-client-id]')).some(el => el.dataset.clientId === String(clientId))) return;
+
+        const row = document.createElement('div');
+        row.className = 'flex items-center gap-2';
+        row.dataset.clientId = clientId;
+        // store client name for reinsertion into dropdown on removal
+        row.dataset.clientName = clientName;
+        row.innerHTML = `<input type="hidden" name="client_ids" value="${clientId}"><input type="text" class="p-2 border rounded bg-gray-100 flex-grow" value="${clientName}" readonly><button type="button" class="px-3 py-2 bg-red-600 text-white rounded w-20 flex-shrink-0" onclick="removeClientRow(this)">Remove</button>`;
+        clientsContainer.appendChild(row);
+
+        // Remove the option from the dropdown so it can't be added twice
+        try {
+            const opt = Array.from(availableClientSelect.options).find(o => o.value === String(clientId));
+            if (opt) opt.remove();
+        } catch (e) {
+            // ignore
+        }
+    }
+
+    function removeClientRow(button) {
+        const row = button.parentElement;
+        const cid = row.dataset.clientId;
+        const cname = row.dataset.clientName || (row.querySelector('input[type="text"]') || {}).value || '';
+        // Re-add option to dropdown (if not already present)
+        try {
+            if (!Array.from(availableClientSelect.options).some(o => o.value === String(cid))) {
+                const opt = document.createElement('option');
+                opt.value = cid;
+                opt.text = cname;
+                availableClientSelect.appendChild(opt);
+            }
+        } catch (e) {
+            // ignore
+        }
+        row.remove();
+    }
+
+    addClientBtn.addEventListener('click', () => {
+        const val = availableClientSelect.value;
+        if (!val) return;
+        const name = availableClientSelect.options[availableClientSelect.selectedIndex].text;
+        createClientRow(val, name);
+        // Reset selector
+        availableClientSelect.value = '';
+    });
+
+    // Pre-populate associated clients when editing
+    (function() {
+        try {
+            const associated = {{ associated_client_ids | tojson | safe }} || [];
+            const allClients = {{ all_clients | tojson | safe }} || [];
+            if (associated && associated.length) {
+                associated.forEach(cid => {
+                    const c = allClients.find(x => x.id === cid) || null;
+                    if (c) createClientRow(c.id, c.name + (c.token ? (' (' + c.token + ')') : ''));
+                });
+            }
+        } catch (e) {
+            // ignore if templates not rendered with these contexts
+        }
+    })();
+</script>
+{% endblock %}

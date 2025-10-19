@@ -1,0 +1,133 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<div class="bg-white p-6 rounded-lg shadow-sm">
+    <h2 class="text-lg font-semibold mb-4">{% if client %}Edit Client: {{ client.name }}{% else %}Create New Client{% endif %}</h2>
+    {% if error %}
+        <script>try { alert({{ error | tojson | safe }}); } catch(e) { console.error('alert error', e); }</script>
+    {% endif %}
+    <form method="post" action="{{ edit_action if client else '/clients/save' }}" id="client-form">
+        <div class="grid grid-cols-1 gap-4">
+            <div>
+                <label class="text-sm font-medium">Name</label>
+                <input name="name" class="p-2 border rounded w-full mt-1" value="{{ client.name if client else '' }}" required />
+            </div>
+            <div>
+                <label class="text-sm font-medium">Description</label>
+                <input name="description" class="p-2 border rounded w-full mt-1" value="{{ client.description if client else '' }}" />
+            </div>
+            <div>
+                <label class="text-sm font-medium">Token</label>
+                <div class="flex items-center gap-2">
+                    <input name="token" class="p-2 border rounded w-full mt-1 font-mono" value="{{ client.token if client else generated_token }}" readonly />
+                    <button type="button" id="regen-token" class="px-3 py-2 bg-gray-600 text-white rounded">Regenerate</button>
+                </div>
+            </div>
+            <div>
+                <label class="text-sm font-medium">Associate Endpoints</label>
+                <p class="text-xs text-gray-500 mt-1">Select endpoints this client may call. You can manage endpoint membership later from the Endpoint page.</p>
+                <div id="endpoints-container" class="mt-2 space-y-2">
+                    {# Server-render linked endpoints so edit view shows them immediately #}
+                    {% if linked_endpoint_ids and all_endpoints %}
+                        {% for e in all_endpoints %}
+                            {% if e.id in linked_endpoint_ids %}
+                                <div class="flex items-center gap-2" data-eid="{{ e.id }}">
+                                    <input type="hidden" name="endpoint_ids" value="{{ e.id }}">
+                                    <input type="text" class="p-2 border rounded bg-gray-100 flex-grow" value="/api/{{ e.path }}{% if e.description %} — {{ e.description }}{% endif %}" readonly>
+                                    <button type="button" class="px-3 py-2 bg-red-600 text-white rounded w-20" onclick="this.parentElement.remove()">Remove</button>
+                                </div>
+                            {% endif %}
+                        {% endfor %}
+                    {% endif %}
+                </div>
+                <div class="flex items-center gap-2 mt-3 pt-3 border-t">
+                    <select id="available-endpoint-select" class="p-2 border rounded flex-grow">
+                        <option value="">-- Select endpoint to add --</option>
+                        {% for e in all_endpoints %}
+                            <option value="{{ e.id }}">/api/{{ e.path }}{% if e.description %} — {{ e.description }}{% endif %}</option>
+                        {% endfor %}
+                    </select>
+                    <button type="button" id="add-endpoint-btn" class="px-3 py-2 bg-gray-600 text-white rounded w-20">Add</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="flex justify-end items-center space-x-3 border-t pt-4 mt-6">
+            <a href="/clients" class="px-4 py-2 bg-gray-200 text-gray-800 rounded">Cancel</a>
+            <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded">{% if client %}Save Changes{% else %}Create Client{% endif %}</button>
+        </div>
+    </form>
+</div>
+<script>
+    const endpointsContainer = document.getElementById('endpoints-container');
+    const availableEndpointSelect = document.getElementById('available-endpoint-select');
+    const addEndpointBtn = document.getElementById('add-endpoint-btn');
+
+    function createEndpointRow(eid, label) {
+        if (!eid) return;
+        if (Array.from(endpointsContainer.querySelectorAll('[data-eid]')).some(el => el.dataset.eid === String(eid))) return;
+        const row = document.createElement('div');
+        row.className = 'flex items-center gap-2';
+        row.dataset.eid = eid;
+        row.innerHTML = `<input type="hidden" name="endpoint_ids" value="${eid}"><input type="text" class="p-2 border rounded bg-gray-100 flex-grow" value="${label}" readonly><button type="button" class="px-3 py-2 bg-red-600 text-white rounded w-20" onclick="this.parentElement.remove()">Remove</button>`;
+        endpointsContainer.appendChild(row);
+    }
+
+    addEndpointBtn.addEventListener('click', () => {
+        const val = availableEndpointSelect.value;
+        if (!val) return;
+        const label = availableEndpointSelect.options[availableEndpointSelect.selectedIndex].text;
+        createEndpointRow(val, label);
+        availableEndpointSelect.value = '';
+    });
+
+    // If opened with ?endpoint_id=..., pre-populate that endpoint in the associated endpoints list
+    (function(){
+        try {
+            const params = new URLSearchParams(window.location.search);
+            const pre = params.get('endpoint_id');
+            if (pre) {
+                // try to find the option label
+                const opt = Array.from(availableEndpointSelect.options).find(o => o.value === String(pre));
+                const label = opt ? opt.text : ('/api/' + pre);
+                createEndpointRow(pre, label);
+                // remove the option from the select if we found it
+                try { if (opt) opt.remove(); } catch(e) {}
+                // add a hidden return_to field so the server can redirect back to the endpoint's clients page after save
+                try {
+                    const form = document.getElementById('client-form');
+                    const ret = document.createElement('input');
+                    ret.type = 'hidden';
+                    ret.name = 'return_to';
+                    ret.value = '/endpoints/' + String(pre) + '/clients?is_new=1';
+                    form.appendChild(ret);
+                } catch(e) {}
+            }
+        } catch(e) { /* ignore if not available */ }
+    })();
+
+    // Pre-populate linked endpoints when editing an existing client
+    (function(){
+        try {
+            const linked = {{ linked_endpoint_ids | default([]) | tojson | safe }};
+            if (Array.isArray(linked) && linked.length) {
+                linked.forEach(id => {
+                    try {
+                        const opt = Array.from(availableEndpointSelect.options).find(o => o.value === String(id));
+                        const label = opt ? opt.text : ('/api/' + id);
+                        createEndpointRow(id, label);
+                        try { if (opt) opt.remove(); } catch(e) {}
+                    } catch(e) { /* ignore per-row errors */ }
+                });
+            }
+        } catch(e) { /* ignore if server didn't provide linked_endpoint_ids */ }
+    })();
+
+    document.getElementById('regen-token').addEventListener('click', () => {
+        // lightweight token regeneration UI: request a new token from server endpoint if available
+        // For now just generate a client-side random token placeholder (server will override on save)
+        const tokenInput = document.querySelector('input[name=token]');
+        try { tokenInput.value = 'dpy_' + Math.random().toString(36).slice(2,12) + Math.random().toString(36).slice(2,12); } catch(e){}
+    });
+</script>
+{% endblock %}

@@ -1,45 +1,91 @@
 {% extends 'base.html' %}
 {% block content %}
 <div class="bg-white p-6 rounded-lg shadow-sm">
-    <div class="flex justify-between items-center">
-        <h2 class="text-lg font-semibold mb-4">Clients for Endpoint: {{ endpoint.path }}</h2>
-        {% if request.query_params.get('is_new') %}
-            <a href="/endpoints" class="px-4 py-2 bg-green-600 text-white rounded text-sm">Finish & Go to Endpoints &rarr;</a>
-        {% endif %}
-    </div>
+  <div class="flex justify-between items-center">
+    <h2 class="text-lg font-semibold mb-4">Clients for Endpoint: {{ endpoint.path }}</h2>
+  </div>
     
-    <!-- Add Client Form -->
-    <form method="post" action="/endpoints/{{ endpoint.id }}/clients/add" class="grid grid-cols-3 gap-2 mb-6 border-b pb-4">
-      <input name="name" placeholder="New Client Name (e.g., Billing Service)" class="p-2 border rounded col-span-2" required />
-      <div class="text-right"><button class="px-3 py-2 bg-blue-600 text-white rounded">Add Client & Generate Token</button></div>
-    </form>
+    <!-- Simple multi-add clients UI -->
+      <form id="add-clients-form" method="post" action="/endpoints/{{ endpoint.id }}/clients/add">
+        <div id="selected-clients" class="mt-3 space-y-2"></div>
 
-    <h3 class="font-semibold mb-2">Existing Clients</h3>
-    <table class="min-w-full text-sm">
-      <thead class="bg-gray-100">
-        <tr>
-          <th class="px-3 py-2 text-left">Name</th>
-          <th class="px-3 py-2 text-left">Token</th>
-          <th class="px-3 py-2 text-left">Created</th>
-          <th class="px-3 py-2 text-left">Action</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for client in clients %}
-        <tr class="border-t">
-          <td class="px-3 py-2">{{ client.name }}</td>
-          <td class="px-3 py-2 font-mono text-xs">{{ client.token }}</td>
-          <td class="px-3 py-2">{{ client.created_at.strftime('%Y-%m-%d') }}</td>
-          <td class="px-3 py-2">
-            <form method="post" action="/clients/delete/{{ client.id }}">
-                <button onclick="return confirm('Are you sure you want to delete this client? This will revoke their API access immediately.');" class="px-3 py-1 bg-red-600 text-white rounded text-xs">Delete</button>
-            </form>
-          </td>
-        </tr>
-        {% else %}
-        <tr><td colspan="4" class="text-center p-4 text-gray-500">No clients have been created for this endpoint yet.</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
+        <!-- single-line add control: dropdown + Add button -->
+        <div class="mt-3 flex gap-2 items-center border-t mt-3 pt-3 ">
+          <select id="available-client-select" class="flex-grow p-3 rounded">
+            <option value="">-- select client to add --</option>
+            {% for c in all_clients %}
+              <option value="{{ c.id }}">{{ c.name }}{% if c.token %} ({{ c.token }}){% endif %}</option>
+            {% endfor %}
+          </select>
+          <button type="button" id="add-client-btn" class="px-3 py-2 bg-gray-600 text-white rounded w-20">Add</button>
+          <a id="create-client-btn" href="/clients/new?endpoint_id={{ endpoint.id }}&is_new=1" class="px-3 py-2 bg-green-600 text-white rounded">Create</a>
+        </div>
+
+  <!-- hidden inputs are kept inside each selected row so they submit naturally -->
+
+        <div class="flex justify-end items-center space-x-3 border-t pt-4 mt-6">
+          <a href="/endpoints" class="px-4 py-2 bg-gray-200 text-gray-800 rounded">Cancel</a>
+          <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded">{% if request.query_params.get('is_new') %}Save Client{% else %}Save Changes{% endif %}</button>
+        </div>
+      </form>
+
+<script>
+// Manage adding multiple existing clients before submission
+(function(){
+  const addBtn = document.getElementById('add-client-btn');
+  const select = document.getElementById('available-client-select');
+  const selectedContainer = document.getElementById('selected-clients');
+  const form = document.getElementById('add-clients-form');
+
+  function createSelectedRow(id, label) {
+  // Prevent duplicates
+  if (Array.from(selectedContainer.querySelectorAll('input[name="client_ids"]')).some(i => i.value === String(id))) return;
+    const row = document.createElement('div');
+    row.className = 'flex items-center gap-2 bg-gray-50 rounded';
+    row.dataset.clientId = id;
+    row.innerHTML = `<input type="hidden" name="client_ids" value="${id}"><input type="text" readonly class="p-2 border rounded bg-gray-100 flex-grow" value="${label}"><button type="button" class="px-3 py-2 bg-red-600 text-white rounded w-20">Remove</button>`;
+    const removeBtn = row.querySelector('button');
+    removeBtn.addEventListener('click', () => {
+      // re-add the client to dropdown if not present
+      try {
+        if (!Array.from(select.options).some(o => o.value === String(id))) {
+          const opt = document.createElement('option'); opt.value = id; opt.text = label; select.appendChild(opt);
+        }
+      } catch (e) {}
+      row.remove();
+    });
+  selectedContainer.appendChild(row);
+  }
+
+  addBtn.addEventListener('click', function(){
+    const val = select.value;
+    if (!val) return;
+    const label = select.options[select.selectedIndex].text;
+    createSelectedRow(val, label);
+    // remove selected option from dropdown to avoid duplicates
+    try { select.options[select.selectedIndex].remove(); } catch(e) {}
+    // reset select
+    select.value = '';
+  });
+  // Pre-populate already-associated clients from server-provided list and remove them from dropdown
+  (function(){
+    try {
+      const associated = {{ associated_clients | default([]) | tojson | safe }};
+      if (Array.isArray(associated)) {
+        associated.forEach(c => {
+          createSelectedRow(c.id, c.name + (c.token ? (' (' + c.token + ')') : ''));
+          // remove option from select if present
+          try {
+            const opt = Array.from(select.options).find(o => o.value === String(c.id));
+            if (opt) opt.remove();
+          } catch (e) {}
+        });
+      }
+    } catch(e) { /* ignore if context missing */ }
+  })();
+
+  // No JS submit interception: let the browser submit the form normally so the server handles redirects
+})();
+</script>
 </div>
 {% endblock %}

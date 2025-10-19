@@ -1,20 +1,10 @@
 {% extends 'base.html' %}
 {% block content %}
-<div class="bg-white p-6 rounded shadow" x-data="{ isDevMode: {{ 'true' if endpoint.is_development_mode else 'false' }} }">
+<div class="bg-white p-6 rounded shadow" x-data="{ isDevMode: {{ 'true' if endpoint.is_development_mode else 'false' }}, devRulesEnabled: {{ 'true' if (endpoint.dev_rules_enabled is defined and endpoint.dev_rules_enabled) or endpoint.is_development_mode else 'false' }} }">
     
     <!-- Header Section -->
     <div class="flex justify-between items-center mb-4 pb-4 border-b">
         <h2 class="text-lg font-semibold">Configure Rules for: /api/{{ endpoint.path }}</h2>
-        <div class="flex items-center space-x-3">
-            <span class="text-sm font-medium text-gray-700">Development Mode</span>
-            <form action="/endpoints/{{ endpoint.id }}/toggle_dev_mode" method="post" class="inline">
-                <button type="submit" @click.prevent="$event.target.closest('form').submit()" 
-                        :class="isDevMode ? 'bg-green-500' : 'bg-gray-200'" 
-                        class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors">
-                    <span :class="isDevMode ? 'translate-x-6' : 'translate-x-1'" class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform"></span>
-                </button>
-            </form>
-        </div>
     </div>
 
     <!-- Main Form for Saving Rules -->
@@ -61,16 +51,49 @@
             </div>
         </div>
 
-        <!-- Section 2: Development Rules -->
-        <div x-show="isDevMode" class="border p-4 rounded-lg mt-6" style="display: none;">
-            <h3 class="font-semibold text-lg mb-3 pb-2 border-b">Development Rules</h3>
-            <p class="text-sm text-gray-600 mb-3">When ON, these rules override incoming data. Rules are checked bottom-to-top; the first one that matches is applied.</p>
+    <!-- Section 2: Development Mode -->
+    <div x-show="true" class="border p-4 rounded-lg mt-6">
+            <div class="flex justify-between items-center mb-3 pb-2 border-b">
+                <!-- Toggle acts as the section label -->
+                    <div class="flex items-center space-x-3">
+                        <button type="button" @click="isDevMode = !isDevMode" :class="isDevMode ? 'bg-green-500' : 'bg-gray-200'" class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors">
+                            <span :class="isDevMode ? 'translate-x-6' : 'translate-x-1'" class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform"></span>
+                        </button>
+                        <h3 class="font-semibold text-lg">Development Mode</h3>
+                    </div>
+                    <!-- Hidden input so server receives dev mode state when the rules form is submitted -->
+                    <input type="hidden" name="is_development_mode" :value="isDevMode ? '1' : '0'">
+
+            </div>
+            <div class="mb-4 px-3" x-show="isDevMode" style="display: none;">
+                <label class="inline-flex items-center space-x-2">
+                    <input type="checkbox" name="dev_hold_tasks" value="1" class="form-checkbox h-4 w-4 text-indigo-600"
+                        {% if endpoint.dev_hold_tasks %}checked{% endif %}>
+                    <span class="text-sm text-gray-700">Hold incoming tasks for manual inspection (place into <code>dev</code> state)</span>
+                </label>
+                <p class="text-xs text-gray-500 mt-1">When enabled and Development Mode is active, incoming requests will be recorded but not processed by workers.</p>
+            </div>
+            <div class="mb-4 px-3" x-show="isDevMode" style="display: none;">
+                <label class="inline-flex items-center space-x-2">
+                    <input type="checkbox" name="dev_rules_enabled" value="1" x-model="devRulesEnabled" class="form-checkbox h-4 w-4 text-indigo-600"
+                        {% if endpoint.dev_rules_enabled is defined and endpoint.dev_rules_enabled %}checked{% elif endpoint.is_development_mode %}checked{% endif %}>
+                    <span class="text-sm text-gray-700">Activate development rules (allow overrides defined below)</span>
+                </label>
+                <p class="text-xs text-gray-500 mt-1">When enabled and Development Mode is active, the rules below will be applied to incoming requests.</p>
+            </div>
+            <div x-show="isDevMode && devRulesEnabled" style="display: none;">
+
+            <!-- Dev Section: Option to hold incoming tasks in dev state -->
+
+
             <div id="dev-rules-container" class="space-y-2"></div>
+            <p id="dev-rules-error" class="text-sm text-red-600 hidden mt-2"></p>
             <div class="mt-3 pt-3 border-t">
                 <button type="button" id="add-dev-rule-btn" class="px-3 py-2 bg-gray-600 text-white rounded text-sm">+ Add Dev Rule</button>
             </div>
         </div>
-
+</div>
+        <!-- Form actions: always visible (moved out of the development section) -->
         <div class="flex justify-end items-center space-x-3 border-t pt-4 mt-6">
             <a href="/endpoints" class="px-4 py-2 bg-gray-200 text-gray-800 rounded">Cancel</a>
             {% if request.query_params.get('is_new') %}
@@ -82,6 +105,9 @@
         </div>
     </form>
 </div>
+
+<!-- Modal: require enabling hold tasks or dev rules when Dev Mode is active -->
+<!-- (No custom modal — uses simple JS alert instead) -->
 <script src="/static/alpine.min.js" defer></script>
 <script>
     const devRulesContainer = document.getElementById('dev-rules-container');
@@ -113,11 +139,11 @@
         row.innerHTML = `
             <select name="dev_condition_param" class="p-2 border rounded w-1/4 text-sm" onchange="handleConditionChange(this)">${conditionParamOptions}</select>
             <span class="text-gray-500 equals-span"></span>
-            <input name="dev_condition_value" value="${rule.condition_value || ''}" placeholder="equals to this value..." class="p-2 border rounded w-1/4 text-sm">
+            <input name="dev_condition_value" value="${rule.condition_value || ''}" placeholder="contains this value..." class="p-2 border rounded w-1/4 text-sm">
             <span class="text-gray-500">THEN</span>
             <select name="dev_target_param" class="p-2 border rounded w-1/4 text-sm">${targetParamOptions}</select>
             <input name="dev_override_value" value="${rule.override_value || ''}" placeholder="to this new value" class="p-2 border rounded flex-grow text-sm">
-            <button type="button" class="px-3 py-2 bg-red-600 text-white rounded text-sm w-20 flex-shrink-0" onclick="this.parentElement.remove()">Remove</button>
+            <button type="button" class="remove-dev-rule px-3 py-2 bg-red-600 text-white rounded text-sm w-20 flex-shrink-0">Remove</button>
         `;
         devRulesContainer.appendChild(row);
         
@@ -125,12 +151,166 @@
     }
 
     addDevRuleBtn.addEventListener('click', () => createDevRuleRow());
-    
+
+    // Event delegation for remove buttons
+    devRulesContainer.addEventListener('click', function(e) {
+        if (e.target && e.target.classList.contains('remove-dev-rule')) {
+            const row = e.target.closest('div');
+            if (row) row.remove();
+            updateDevRulesState();
+        }
+    });
+
     const existingDevRules = {{ dev_rules | tojson | safe }};
     if (existingDevRules && existingDevRules.length > 0) {
         existingDevRules.forEach(createDevRuleRow);
     } else {
         createDevRuleRow();
+    }
+
+    // Keep the dev_rules_enabled checkbox in sync: uncheck it when there are no rules
+    function updateDevRulesState() {
+        const rows = devRulesContainer.querySelectorAll('div');
+        const devRulesCheckbox = document.querySelector('input[name="dev_rules_enabled"]');
+        const errorEl = document.getElementById('dev-rules-error');
+        if (!rows || rows.length === 0) {
+            if (devRulesCheckbox) devRulesCheckbox.checked = false;
+        }
+        // Clear error when rules exist
+        if (errorEl) {
+            errorEl.textContent = '';
+            errorEl.classList.add('hidden');
+        }
+    }
+
+    // Validate on form submit: if dev rules are enabled, ensure at least one valid rule exists
+    const rulesForm = document.querySelector('form[action="/endpoints/{{ endpoint.id }}/rules"]');
+    if (rulesForm) {
+        // Helper to mark/unmark invalid inputs and attach focus behavior
+        function markInvalid(el) {
+            if (!el) return;
+            el.classList.add('border-red-600', 'ring-2', 'ring-red-200');
+            // remove invalid state when user focuses the element
+            const onFocus = function() {
+                el.classList.remove('border-red-600', 'ring-2', 'ring-red-200');
+                el.classList.add('ring-2', 'ring-blue-400');
+                el.removeEventListener('focus', onFocus);
+                // remove blue ring on blur
+                el.addEventListener('blur', function() { el.classList.remove('ring-2', 'ring-blue-400'); }, { once: true });
+            };
+            el.addEventListener('focus', onFocus);
+        }
+
+        // Attach focus handlers to form inputs to show blue focus ring
+        rulesForm.querySelectorAll('input, select, textarea').forEach(el => {
+            el.addEventListener('focus', () => {
+                el.classList.add('ring-2', 'ring-blue-400');
+            });
+            el.addEventListener('blur', () => {
+                el.classList.remove('ring-2', 'ring-blue-400');
+            });
+        });
+
+        rulesForm.addEventListener('submit', function(e) {
+            const devRulesCheckbox = document.querySelector('input[name="dev_rules_enabled"]');
+            const devModeHidden = document.querySelector('input[name="is_development_mode"]');
+            const devHoldCheckbox = document.querySelector('input[name="dev_hold_tasks"]');
+            const modal = document.getElementById('dev-mode-modal');
+            const enableHoldBtn = document.getElementById('enable-hold-btn');
+            const enableDevrulesBtn = document.getElementById('enable-devrules-btn');
+            const cancelDevmodeBtn = document.getElementById('cancel-devmode-btn');
+            const devModeOn = devModeHidden && ['1','true','on'].includes(String(devModeHidden.value));
+            if (devModeOn && devRulesCheckbox && devRulesCheckbox.checked) {
+                const rows = Array.from(devRulesContainer.querySelectorAll('div'));
+                // Validate each row: require target_param and override_value. If a condition is set (not always), require condition_value.
+                let anyValid = false;
+                const rowInvalids = [];
+                rows.forEach(row => {
+                    const conditionParam = row.querySelector('select[name="dev_condition_param"]');
+                    const conditionValue = row.querySelector('input[name="dev_condition_value"]');
+                    const target = row.querySelector('select[name="dev_target_param"]');
+                    const overrideVal = row.querySelector('input[name="dev_override_value"]');
+
+                    const hasTarget = target && target.value && target.value.trim();
+                    const hasOverride = overrideVal && overrideVal.value && overrideVal.value.trim();
+
+                    // condition must have value if conditionParam is provided and not equal to 'always' (the option used for unconditional)
+                    let conditionSatisfied = true;
+                    if (conditionParam && conditionParam.value) {
+                        if (!(conditionValue && conditionValue.value && conditionValue.value.trim())) {
+                            conditionSatisfied = false;
+                            rowInvalids.push(conditionValue || conditionParam);
+                        }
+                    }
+
+                    if (hasTarget && hasOverride && conditionSatisfied) anyValid = true;
+
+                    if (!hasTarget) {
+                        rowInvalids.push(target);
+                    }
+                    if (!hasOverride) {
+                        rowInvalids.push(overrideVal);
+                    }
+                });
+
+                if (!anyValid) {
+                    e.preventDefault();
+                    const errorEl = document.getElementById('dev-rules-error');
+                    if (errorEl) {
+                        errorEl.textContent = 'Please add at least one development rule with a target and override value (and a condition value if the rule is conditional), or disable development rules.';
+                        errorEl.classList.remove('hidden');
+                    }
+                    // Mark invalids and scroll first into view (do not programmatically focus)
+                    for (const inv of rowInvalids) { if (inv) markInvalid(inv); }
+                    const firstInvalidRow = rulesForm.querySelector('.border-red-600');
+                    if (firstInvalidRow) {
+                        firstInvalidRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }
+                    updateDevRulesState();
+                    return false;
+                }
+            }
+
+            // Validate parameter mapping inputs (always required)
+            // For each source_type_{rid}_{key}, ensure it's set; if from_source, source_value must be set.
+            const mappingInvalids = [];
+            rulesForm.querySelectorAll('select[name^="source_type_"]').forEach(sel => {
+                const name = sel.getAttribute('name');
+                const parts = name.split('_');
+                // name format: source_type_{resourceId}_{...target_key...}
+                if (parts.length < 4) return;
+                const resourceId = parts[2];
+                const targetKey = parts.slice(3).join('_');
+                const sourceValueEl = rulesForm.querySelector(`select[name="source_value_${resourceId}_${targetKey}"]`);
+                // source type must be selected
+                if (!sel.value || !sel.value.trim()) {
+                    mappingInvalids.push(sel);
+                }
+                // source value (the "-- Select Source Key --" placeholder has empty value) is required; mark it invalid if empty
+                if (!sourceValueEl || !sourceValueEl.value || !String(sourceValueEl.value).trim()) {
+                    mappingInvalids.push(sourceValueEl || sel);
+                }
+            });
+            if (mappingInvalids.length > 0) {
+                e.preventDefault();
+                // mark and focus first
+                mappingInvalids.forEach(el => markInvalid(el));
+                const firstMappingInvalid = rulesForm.querySelector('.border-red-600');
+                if (firstMappingInvalid) firstMappingInvalid.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                return false;
+            }
+
+            // Intercept the case where Dev Mode is ON but neither hold nor dev rules are enabled
+            if (devModeHidden && devModeHidden.value && ['1', 'true', 'on'].includes(String(devModeHidden.value)) ) {
+                const holdChecked = devHoldCheckbox && devHoldCheckbox.checked;
+                const devRulesChecked = devRulesCheckbox && devRulesCheckbox.checked;
+                if (!holdChecked && !devRulesChecked) {
+                    e.preventDefault();
+                    window.alert('Development Mode requires either holding incoming tasks or activating development rules. Please enable one before saving.');
+                    return false;
+                }
+            }
+        });
     }
 </script>
 {% endblock %}

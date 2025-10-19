@@ -61,8 +61,8 @@
         </div>
         
         <div id="retry-container" class="mt-4 border-t pt-4">
-            {% if task.status == 'failed' or task.status == 'pending' %}
-                <button id="retry-btn" data-tid="{{ task.id }}" class="px-4 py-2 bg-yellow-500 text-white rounded hover:bg-yellow-600">Retry Task</button>
+            {% if task.status == 'failed' or task.status == 'pending' or task.status == 'dev' %}
+                <button id="retry-btn" data-tid="{{ task.id }}" class="px-4 py-2 bg-yellow-500 text-white rounded hover:bg-yellow-600">{% if attempt_logs|length == 0 %}Send Task{% else %}Retry Task{% endif %}</button>
             {% endif %}
         </div>
     </div>

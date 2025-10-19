@@ -17,10 +17,12 @@
             </form>
         </div>
 
+        <form method="post" action="/tasks/batch_delete" id="batch-delete-form" onsubmit="return confirm('Are you sure you want to delete the selected tasks? This action cannot be undone.');">
         <div class="overflow-x-auto">
             <table class="min-w-full text-sm">
                 <thead class="bg-gray-100">
                     <tr>
+                        <th class="px-3 py-2 text-left"><input type="checkbox" id="select-all" onclick="toggleAllTasks(this)"></th>
                         <th class="px-3 py-2 text-left">ID</th>
                         <th class="px-3 py-2 text-left">Client</th>
                         <th class="px-3 py-2 text-left">Ref / Scope</th>
@@ -33,6 +35,7 @@
                 <tbody>
                     {% for t in tasks %}
                     <tr class="border-t">
+                        <td class="px-3 py-2"><input type="checkbox" name="task_ids" value="{{ t.id }}"></td>
                         <td class="px-3 py-2">{{ t.id }}</td>
                         <td class="px-3 py-2">{{ t.client_name or 'N/A' }}</td>
                         <td class="px-3 py-2 text-xs">
@@ -48,11 +51,45 @@
                     </tr>
                     {% else %}
                     <tr>
-                        <td colspan="8" class="text-center p-4 text-gray-500">No incoming task yet.</td>
+                        <td colspan="9" class="text-center p-4 text-gray-500">No incoming task yet.</td>
                     </tr>
                     {% endfor %}
                 </tbody>
             </table>
         </div>
+        <div class="mt-4">
+            <!-- Hidden by default; will be shown when at least one task is selected -->
+            <button type="submit" class="px-4 py-2 bg-red-600 text-white rounded" id="batch-delete-btn" style="display:none;" disabled>Delete</button>
+        </div>
+        </form>
     </div>
+    <script>
+    function toggleAllTasks(source) {
+        const checkboxes = document.querySelectorAll('input[name="task_ids"]');
+        for (const cb of checkboxes) {
+            cb.checked = source.checked;
+        }
+        toggleDeleteBtn();
+    }
+    document.addEventListener('DOMContentLoaded', function() {
+        const checkboxes = document.querySelectorAll('input[name="task_ids"]');
+        for (const cb of checkboxes) {
+            cb.addEventListener('change', toggleDeleteBtn);
+        }
+        // Ensure correct initial state (hidden when no selection)
+        toggleDeleteBtn();
+    });
+    function toggleDeleteBtn() {
+        const checkboxes = document.querySelectorAll('input[name="task_ids"]');
+        const btn = document.getElementById('batch-delete-btn');
+        const anyChecked = checkboxes.length > 0 && Array.from(checkboxes).some(cb => cb.checked);
+        if (anyChecked) {
+            btn.style.display = '';
+            btn.disabled = false;
+        } else {
+            btn.style.display = 'none';
+            btn.disabled = true;
+        }
+    }
+    </script>
     {% endblock %}

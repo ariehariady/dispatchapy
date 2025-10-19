@@ -38,6 +38,7 @@
             <a href="/tasks" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-gray-700 hover:text-white">Tasks</a>
             <a href="/resources" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-gray-700 hover:text-white">Resources</a>
             <a href="/endpoints" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-gray-700 hover:text-white">Endpoints</a>
+            <a href="/clients" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-gray-700 hover:text-white">Clients</a>
             <a href="/settings" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-gray-700 hover:text-white">Settings</a>
             <a href="/documentation" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-gray-700 hover:text-white">API Docs</a>
             <form action="/logout" method="post" class="inline">
@@ -63,9 +64,14 @@
                 try {
                     const response = await fetch(`/resources/${resourceId}/check`, { method: 'POST' });
                     const data = await response.json();
-                    if (!response.ok) { throw new Error(data.detail || 'Check failed with no details.'); }
-                    if (data.success) { alert(`Health Check Result: HEALTHY\n\nStatus Code: ${data.status_code}\nDetails: ${data.detail}`);
-                    } else { alert(`Health Check Result: UNHEALTHY\n\nStatus Code: ${data.status_code}\nDetails: ${data.detail}`); }
+                    const message = data.detail || data.message || 'Check failed with no details.';
+                    const rid = data.request_id ? ` (id: ${data.request_id})` : '';
+                    if (!response.ok) { throw new Error(message + rid); }
+                    if (data.success) {
+                        alert(`Health Check Result: HEALTHY\n\nStatus Code: ${data.status_code}\nDetails: ${message}${rid}`);
+                    } else {
+                        alert(`Health Check Result: UNHEALTHY\n\nStatus Code: ${data.status_code}\nDetails: ${message}${rid}`);
+                    }
                     window.location.reload();
                 } catch (error) {
                     alert('Manual check failed: ' + error.message);
@@ -84,6 +90,7 @@
                 let isActive = (linkPath === currentPath);
                 if (linkPath === '/documentation' && (currentPath === '/docs' || currentPath === '/redoc')) { isActive = true; }
                 if (currentPath.startsWith('/endpoints') && linkPath === '/endpoints') { isActive = true; }
+                if (currentPath.startsWith('/clients') && linkPath === '/clients') { isActive = true; }
                 if (currentPath.startsWith('/resources') && linkPath === '/resources') { isActive = true; }
                 if (currentPath.startsWith('/task') && linkPath === '/tasks') { isActive = true; }
                 if (isActive) {

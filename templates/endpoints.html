@@ -28,7 +28,7 @@
               <th class="px-3 py-2 text-left">Status</th>
               <th class="px-3 py-2 text-left">Dev Mode</th>
               <th class="px-3 py-2 text-left">Active</th>
-              <th class="px-3 py-2 text-left">Action</th>
+              <th class="p-2 text-right"></th>
             </tr>
           </thead>
           <tbody>
@@ -50,7 +50,7 @@
                     <button type="submit" class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors {{ 'bg-blue-500' if e.is_active else 'bg-gray-200' }}"><span class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform {{ 'translate-x-6' if e.is_active else 'translate-x-1' }}"></span></button>
                 </form>
               </td>
-              <td class="px-3 py-2 whitespace-nowrap">
+              <td class="p-2 text-right whitespace-nowrap">
                 <a class="px-2 py-1 bg-blue-600 rounded text-white text-xs" href="/endpoints/edit/{{ e.id }}">Edit</a>
                 <a class="ml-2 px-2 py-1 bg-yellow-500 rounded text-white text-xs" href="/endpoints/{{ e.id }}/rules">Rules</a>
                 <a class="ml-2 px-2 py-1 bg-green-600 rounded text-white text-xs" href="/endpoints/{{ e.id }}/clients">Clients</a>

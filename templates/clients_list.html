@@ -1,0 +1,50 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="bg-white p-6 rounded shadow">
+  <div class="flex justify-between items-center mb-4">
+    <h2 class="text-lg font-semibold">Clients</h2>
+    <div class="flex items-center gap-2">
+      <a href="/clients/new" class="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700">+ Client</a>
+    </div>
+  </div>
+  <div class="space-y-3">
+    {% if clients and clients|length > 0 %}
+
+    <table class="min-w-full text-sm">
+        <thead>
+
+          <tr class="bg-gray-100">
+            <th class="px-3 py-2 text-left">Name</th>
+            <th class="px-3 py-2 text-left">Token</th>
+            <th class="px-3 py-2 text-left">Endpoints</th>
+            <th class="p-2"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for c in clients %}
+          <tr class="border-t">
+            <td class="p-2">{{ c.name }}</td>
+            <td class="p-2 font-mono text-sm">{{ c.token }}</td>
+            <td class="p-2 text-sm">
+              {% if client_endpoints.get(c.id) %}
+                {{ client_endpoints.get(c.id) | join(', ') }}
+              {% else %}
+                -
+              {% endif %}
+            </td>
+            <td class="p-2 text-right whitespace-nowrap">
+              <a href="/clients/edit/{{ c.id }}" class="px-2 py-1 bg-blue-600 rounded text-white text-xs">Edit</a>
+              <form method="post" action="/clients/delete/{{ c.id }}" style="display:inline" onsubmit="return confirm('Delete client {{ c.name }}? This cannot be undone.')">
+                <button type="submit" class="ml-2 px-2 py-1 bg-red-600 rounded text-white text-xs">Delete</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="text-gray-600">No clients configured yet.</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
