@@ -54,6 +54,9 @@
                 <a class="px-2 py-1 bg-blue-600 rounded text-white text-xs" href="/endpoints/edit/{{ e.id }}">Edit</a>
                 <a class="ml-2 px-2 py-1 bg-yellow-500 rounded text-white text-xs" href="/endpoints/{{ e.id }}/rules">Rules</a>
                 <a class="ml-2 px-2 py-1 bg-green-600 rounded text-white text-xs" href="/endpoints/{{ e.id }}/clients">Clients</a>
+                <form method="post" action="/endpoints/duplicate/{{ e.id }}" style="display:inline;">
+                    <button onclick="return confirm('Duplicate this endpoint and its configuration?');" class="ml-2 px-2 py-1 bg-indigo-600 rounded text-white text-xs">Duplicate</button>
+                </form>
                 <form method="post" action="/endpoints/delete/{{ e.id }}" style="display:inline;"><button onclick="return confirm('Are you sure you want to delete this endpoint? This action cannot be undone.');" class="ml-2 px-2 py-1 bg-red-600 rounded text-white text-xs">Delete</button></form>
               </td>
             </tr>

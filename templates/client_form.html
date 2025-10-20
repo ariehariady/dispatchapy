@@ -1,12 +1,12 @@
 {% extends 'base.html' %}
 {% block content %}
 
-<div class="bg-white p-6 rounded-lg shadow-sm">
+<div class="bg-white p-6 rounded-lg shadow-sm" x-data="{ isDevMode: {{ 'true' if client and client.is_dev_client else 'false' }}, devRulesEnabled: {{ 'true' if client_dev_rules and client_dev_rules|length > 0 else 'false' }} }">
     <h2 class="text-lg font-semibold mb-4">{% if client %}Edit Client: {{ client.name }}{% else %}Create New Client{% endif %}</h2>
     {% if error %}
         <script>try { alert({{ error | tojson | safe }}); } catch(e) { console.error('alert error', e); }</script>
     {% endif %}
-    <form method="post" action="{{ edit_action if client else '/clients/save' }}" id="client-form">
+    <form method="post" action="/clients/save" id="client-form">
         <div class="grid grid-cols-1 gap-4">
             <div>
                 <label class="text-sm font-medium">Name</label>
@@ -23,7 +23,7 @@
                     <button type="button" id="regen-token" class="px-3 py-2 bg-gray-600 text-white rounded">Regenerate</button>
                 </div>
             </div>
-            <div>
+            <div class="border p-3 rounded">
                 <label class="text-sm font-medium">Associate Endpoints</label>
                 <p class="text-xs text-gray-500 mt-1">Select endpoints this client may call. You can manage endpoint membership later from the Endpoint page.</p>
                 <div id="endpoints-container" class="mt-2 space-y-2">
@@ -50,14 +50,70 @@
                     <button type="button" id="add-endpoint-btn" class="px-3 py-2 bg-gray-600 text-white rounded w-20">Add</button>
                 </div>
             </div>
+            <div x-show="true" class="border p-3 rounded">
+                    <div class="flex justify-between items-center mb-3 pb-2 border-b">
+                        <!-- Toggle acts as the section label -->
+                            <div class="flex items-center space-x-3">
+                                <button type="button" @click="isDevMode = !isDevMode" :class="isDevMode ? 'bg-green-500' : 'bg-gray-200'" class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors">
+                                    <span :class="isDevMode ? 'translate-x-6' : 'translate-x-1'" class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform"></span>
+                                </button>
+                                <label class="text-sm font-medium">Development Mode</label>
+                            </div>
+                            <!-- Hidden input so server receives dev mode state when the rules form is submitted -->
+                            <input type="hidden" name="is_dev_client" :value="isDevMode ? '1' : '0'">
+
+                    </div>
+                    <div class="mb-4 px-3" x-show="isDevMode" style="display: none;">
+                        <label class="inline-flex items-center space-x-2">
+                            <input type="checkbox" name="dev_hold_tasks" value="1" class="form-checkbox h-4 w-4 text-indigo-600"
+                                {% if client and client.dev_hold_tasks %}checked{% endif %}>
+                            <span class="text-sm text-gray-700">Hold incoming tasks for manual inspection (place into <code>dev</code> state)</span>
+                        </label>
+                        <p class="text-xs text-gray-500 mt-1">When enabled and Development Mode is active, incoming requests will be recorded but not processed by workers.</p>
+                    </div>
+                    <div class="mb-4 px-3" x-show="isDevMode" style="display: none;">
+                        <label class="inline-flex items-center space-x-2">
+                            <input type="checkbox" name="dev_rules_enabled" value="1" x-model="devRulesEnabled" class="form-checkbox h-4 w-4 text-indigo-600"
+                                {% if client_dev_rules is defined and client_dev_rules %}checked{% elif client and (client.dev_rules_enabled if client is defined else False) %}checked{% endif %}>
+                            <span class="text-sm text-gray-700">Activate development rules (allow overrides defined below)</span>
+                        </label>
+                        <p class="text-xs text-gray-500 mt-1">When enabled and Development Mode is active, the rules below will be applied to incoming requests.</p>
+                    </div>
+                    <div x-show="isDevMode && devRulesEnabled" style="display: none;">
+
+                    <!-- Dev Section: Option to hold incoming tasks in dev state -->
+
+
+                    <div id="dev-rules-container" class="space-y-2"></div>
+                    <p id="dev-rules-error" class="text-sm text-red-600 hidden mt-2"></p>
+                    <div class="mt-3 pt-3 border-t">
+                        <button type="button" id="add-dev-rule-btn" class="px-3 py-2 bg-gray-600 text-white rounded text-sm">+ Add Dev Rule</button>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <div class="flex justify-end items-center space-x-3 border-t pt-4 mt-6">
             <a href="/clients" class="px-4 py-2 bg-gray-200 text-gray-800 rounded">Cancel</a>
             <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded">{% if client %}Save Changes{% else %}Create Client{% endif %}</button>
         </div>
+            {% if client %}
+                <input type="hidden" name="id" value="{{ client.id }}" />
+            {% endif %}
+            <input type="hidden" name="client_dev_rules_json" id="client_dev_rules_json" />
     </form>
 </div>
+    <script>
+        // bootstrap data for client rules UI
+        window.__DPY_INIT_CLIENT_RULES = {
+            available_rule_keys: {{ available_rule_keys | default([]) | tojson | safe }},
+            client_dev_rules: {{ client_dev_rules | default([]) | tojson | safe }},
+            all_endpoints: {{ all_endpoints | tojson | safe }},
+            linked_endpoint_ids: {{ linked_endpoint_ids | default([]) | tojson | safe }}
+        };
+    </script>
+    <script src="/static/alpine.min.js" defer></script>
+    <script src="/static/client_rules.js" defer></script>
 <script>
     const endpointsContainer = document.getElementById('endpoints-container');
     const availableEndpointSelect = document.getElementById('available-endpoint-select');
@@ -106,10 +162,10 @@
         } catch(e) { /* ignore if not available */ }
     })();
 
-    // Pre-populate linked endpoints when editing an existing client
+    // Pre-populate linked endpoints when editing an existing client (bootstrapped from server)
     (function(){
         try {
-            const linked = {{ linked_endpoint_ids | default([]) | tojson | safe }};
+            const linked = (window.__DPY_INIT_CLIENT_RULES && window.__DPY_INIT_CLIENT_RULES.linked_endpoint_ids) || [];
             if (Array.isArray(linked) && linked.length) {
                 linked.forEach(id => {
                     try {
@@ -120,7 +176,7 @@
                     } catch(e) { /* ignore per-row errors */ }
                 });
             }
-        } catch(e) { /* ignore if server didn't provide linked_endpoint_ids */ }
+        } catch(e) { /* ignore if not available */ }
     })();
 
     document.getElementById('regen-token').addEventListener('click', () => {
@@ -129,5 +185,7 @@
         const tokenInput = document.querySelector('input[name=token]');
         try { tokenInput.value = 'dpy_' + Math.random().toString(36).slice(2,12) + Math.random().toString(36).slice(2,12); } catch(e){}
     });
+
+    // client rules UI moved to /statics/client_rules.js
 </script>
 {% endblock %}

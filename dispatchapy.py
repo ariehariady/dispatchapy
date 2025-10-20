@@ -196,7 +196,13 @@ templates = Jinja2Templates(directory=TEMPLATES_DIR)
 # -------------------------
 # DB models
 # -------------------------
-Base = declarative_base()
+from models import (
+    Base, ExamplePayload, Resource, Endpoint, ParameterRule,
+    DevelopmentRule, Task, TaskLog, Client, ClientDevRule,
+    HealthCheckLog, Setting, EndpointResourceLink, EndpointClientLink,
+    TaskAttemptLog, Log
+)
+
 engine = create_engine(SQLITE_URL, connect_args={"check_same_thread": False})
 SessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=engine))
 
@@ -352,162 +358,8 @@ def _acquire_resource_lock(rid: int):
             return None
     except Exception:
         return None
-
-class ExamplePayload(BaseModel):
-    phone: str = Field(..., example="6281234567890")
-    message: str = Field(..., example="This is a test notification from the gateway.")
-    user_id: int = Field(..., example=12345)
-
-class Resource(Base):
-    __tablename__ = "resources"
-    id = Column(Integer, primary_key=True)
-    name = Column(String, unique=True, nullable=False)
-    endpoint = Column(String, nullable=False)
-    headers = Column(JSON, nullable=True)
-    required_params = Column(JSON, nullable=True)
-    is_active = Column(Boolean, default=True)
-    healthy = Column(Boolean, default=True)
-    last_checked = Column(DateTime, nullable=True)
-    next_health_check_at = Column(DateTime, nullable=True)
-    is_health_check_enabled = Column(Boolean, default=True, nullable=False)
-    health_check_test_values = Column(JSON, nullable=True)
-    health_check_method = Column(String, default='simple', nullable=False)  # 'simple' or 'actual'
-    health_check_interval_min = Column(Integer, default=60, nullable=False)
-    health_check_interval_max = Column(Integer, default=90, nullable=False)
-    send_failure_email = Column(Boolean, default=False)
-    notification_email = Column(Text, nullable=True)
-    notification_subject = Column(String, nullable=True)
-    notification_template = Column(Text, nullable=True)
-    send_failure_webhook = Column(Boolean, default=False)
-    failure_webhook_url = Column(String, nullable=True)
-    failure_webhook_headers = Column(JSON, nullable=True)
-    failure_webhook_payload = Column(JSON, nullable=True)
-    latest_health_check_result = Column(JSON, nullable=True)
-    created_at = Column(DateTime, server_default=func.now())
-
-class Endpoint(Base):
-    __tablename__ = "endpoints"
-    id = Column(Integer, primary_key=True)
-    path = Column(String, unique=True, nullable=False)
-    description = Column(String, nullable=True)
-    required_params = Column(JSON, nullable=True)
-    is_development_mode = Column(Boolean, default=False, nullable=False)
-    # When true and development mode is enabled, incoming tasks will be placed
-    # into a 'dev' state instead of being immediately processed by workers.
-    dev_hold_tasks = Column(Boolean, default=False, nullable=False)
-    # When true, the development rules editor is enabled for this endpoint.
-    dev_rules_enabled = Column(Boolean, default=False, nullable=False)
-    is_active = Column(Boolean, default=True, nullable=False)
-    dev_values = Column(JSON, nullable=True) # Stores {param: dev_value}
-    created_at = Column(DateTime, server_default=func.now())
-
-
-class ParameterRule(Base):
-    __tablename__ = "parameter_rules"
-    id = Column(Integer, primary_key=True)
-    endpoint_id = Column(Integer, nullable=False, index=True)
-    resource_id = Column(Integer, nullable=False, index=True) # <-- ADD THIS
-    target_key = Column(String, nullable=False)
-    source_type = Column(String, nullable=False)
-    source_value = Column(String, nullable=True)
-    created_at = Column(DateTime, server_default=func.now())
-
-class DevelopmentRule(Base):
-    __tablename__ = "development_rules"
-    id = Column(Integer, primary_key=True)
-    endpoint_id = Column(Integer, index=True, nullable=False)
-    
-    # The 'IF' part of the rule
-    condition_param = Column(String, nullable=True) # e.g., "scope", "ref". If NULL, the rule always applies.
-    condition_value = Column(String, nullable=True) # e.g., "PO_NOTIF", "TEST_USER"
-
-    # The 'THEN' part of the rule
-    target_param = Column(String, nullable=False) # The incoming param to override (e.g., "phone")
-    override_value = Column(String, nullable=False) # The new value to use
-
-class Task(Base):
-    __tablename__ = "tasks"
-    id = Column(Integer, primary_key=True)
-    client_name = Column(String, nullable=True)
-    ref_id = Column(String, nullable=True, index=True)
-    scope = Column(String, nullable=True, index=True)
-    endpoint_id = Column(Integer, nullable=False)
-    endpoint_path = Column(String, nullable=False)
-    source_payload = Column(JSON, nullable=False)
-    target_payload = Column(JSON, nullable=True)
-    resource_id = Column(Integer, nullable=True)
-    resource_name = Column(String, nullable=True)
-    status = Column(String, default="pending", index=True) # pending, processing, success, failed
-    attempts = Column(Integer, default=0)
-    retry_count = Column(Integer, default=0, nullable=False)
-    max_retries = Column(Integer, default=5, nullable=False)
-    delay = Column(Integer, default=5, nullable=False)
-    last_error = Column(Text, nullable=True)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, onupdate=func.now())
-
-class TaskLog(Base):
-    __tablename__ = "task_logs"
-    id = Column(Integer, primary_key=True)
-    task_id = Column(Integer, nullable=False, index=True)
-    message = Column(Text, nullable=False)
-    created_at = Column(DateTime, server_default=func.now())
-
-class Client(Base):
-    __tablename__ = "clients"
-    id = Column(Integer, primary_key=True)
-    name = Column(String, nullable=False)
-    token = Column(String, unique=True, nullable=False, index=True)
-    endpoint_id = Column(Integer, nullable=True, index=True)
-    description = Column(String, nullable=True)
-    created_at = Column(DateTime, server_default=func.now())
-
-class HealthCheckLog(Base):
-    __tablename__ = "health_check_logs"
-    id = Column(Integer, primary_key=True)
-    resource_id = Column(Integer, index=True, nullable=False)
-    created_at = Column(DateTime, server_default=func.now())
-    is_success = Column(Boolean, nullable=False)
-    status_code = Column(Integer, nullable=True)
-    response_text = Column(Text, nullable=True)
-    notification_status = Column(String, nullable=True) # e.g., "sent", "failed"
-    method = Column(String, nullable=True) # 'simple' or 'actual'
-
-class Setting(Base):
-    __tablename__ = "settings"
-    key = Column(String, primary_key=True)
-    value = Column(String, nullable=True)
-
-class EndpointResourceLink(Base):
-    __tablename__ = "endpoint_resource_links"
-    id = Column(Integer, primary_key=True)
-    endpoint_id = Column(Integer, index=True, nullable=False)
-    resource_id = Column(Integer, index=True, nullable=False)
-    sequence = Column(Integer, default=0, nullable=False) # Order of execution
-
-
-class EndpointClientLink(Base):
-    __tablename__ = "endpoint_client_links"
-    id = Column(Integer, primary_key=True)
-    endpoint_id = Column(Integer, index=True, nullable=False)
-    client_id = Column(Integer, index=True, nullable=False)
-
-class TaskAttemptLog(Base):
-    __tablename__ = "task_attempt_logs"
-    id = Column(Integer, primary_key=True)
-    task_id = Column(Integer, index=True, nullable=False)
-    resource_id = Column(Integer, nullable=False)
-    resource_name = Column(String, nullable=False)
-    attempt_at = Column(DateTime, server_default=func.now())
-    status = Column(String, nullable=False) # e.g., "success", "failed"
-    details = Column(Text, nullable=True) # To store status code or error message
-
-class Log(Base):
-    __tablename__ = "logs"
-    id = Column(Integer, primary_key=True)
-    task_id = Column(Integer, index=True, nullable=False)
-    created_at = Column(DateTime, server_default=func.now())
-    message = Column(Text, nullable=False)
+# ORM and Pydantic models were moved to models.py to avoid duplication.
+# See: ./models.py
 
 def generate_token():
     return f"dpy_{secrets.token_urlsafe(32)}"
@@ -559,43 +411,83 @@ def choose_resource(db, preferred_id: Optional[int] = None) -> Optional[Resource
     # Fallback to any active resource if no healthy ones are found
     return r if r else db.query(Resource).filter(Resource.is_active == True).order_by(Resource.created_at).first()
 
-def build_target_payload(db: Session, endpoint_id: int, resource_id: int, source_payload: Dict[str, Any], task_id: int) -> Dict[str, Any]:
+def build_target_payload(db: Session, endpoint_id: int, resource_id: int, source_payload: Dict[str, Any], task_id: int, client_id: Optional[int] = None) -> Dict[str, Any]:
     # 1. Create a mutable copy of the payload to work with.
     working_payload = source_payload.copy()
     endpoint = db.query(Endpoint).get(endpoint_id)
+    # Prefer explicit client_id argument; fallback to a marker in the payload for backwards-compat
+    if client_id is None:
+        try:
+            client_id = source_payload.get('_client_id') if isinstance(source_payload, dict) else None
+        except Exception:
+            client_id = None
     
-    # 2. Apply Development Rule Overrides (if dev mode is enabled)
-    if endpoint.is_development_mode:
-        dev_rules = db.query(DevelopmentRule).filter(DevelopmentRule.endpoint_id == endpoint.id).all()
-        overrides_to_apply = {}
-
-        # UPDATED: This single loop implements "last match wins".
-        # As we iterate, later rules that match will overwrite the values from earlier ones.
-        for rule in dev_rules:
+    # 2. Apply Development Rule Overrides in order of precedence:
+    #    1) Client-level dev rules (if client exists and dev_rules_enabled)
+    #    2) Endpoint-level dev rules (if endpoint is in dev mode and dev_rules_enabled)
+    overrides_to_apply = {}
+    # Helper to evaluate a set of rules against the working_payload
+    def _eval_rules_and_collect(rules):
+        collected = {}
+        for rule in rules:
             apply_rule = False
-            # Check for a default rule (no condition)
-            if rule.condition_param is None:
+            if not rule.condition_param:
                 apply_rule = True
-            # Check for a conditional rule that matches the payload using 'contains'
             else:
                 payload_val = working_payload.get(rule.condition_param)
-                if payload_val is not None and rule.condition_value is not None:
-                    try:
-                        # Coerce both to string and perform case-insensitive containment
-                        if str(rule.condition_value).lower() in str(payload_val).lower():
-                            apply_rule = True
-                    except Exception:
-                        # Fallback: no match
-                        apply_rule = False
-            
-            if apply_rule and rule.target_param in working_payload:
-                overrides_to_apply[rule.target_param] = rule.override_value
-        
-        # Now, modify the working payload with the final override values
-        if overrides_to_apply:
-            add_log(db, task_id, f"DEV MODE: Applying payload overrides: {overrides_to_apply}")
-            for param, value in overrides_to_apply.items():
-                working_payload[param] = value
+                if payload_val is None:
+                    apply_rule = False
+                else:
+                    if not rule.condition_value:
+                        apply_rule = True
+                    else:
+                        try:
+                            if re.search(rule.condition_value, str(payload_val)):
+                                apply_rule = True
+                        except Exception:
+                            if str(rule.condition_value) in str(payload_val):
+                                apply_rule = True
+            # Apply the override if the rule matches. Allow setting the target
+            # even if the incoming payload does not currently contain that key.
+            if apply_rule:
+                collected[rule.target_param] = rule.override_value
+        return collected
+
+    # Apply client-level dev rules first
+    client = None
+    try:
+        if client_id:
+            client = db.query(Client).get(client_id)
+    except Exception:
+        client = None
+
+    if client.is_dev_client and client.dev_rules_enabled:
+        try:
+            client_rules = db.query(ClientDevRule).filter(ClientDevRule.client_id == client.id, ClientDevRule.active == True).all()
+            client_overrides = _eval_rules_and_collect(client_rules)
+            if client_overrides:
+                overrides_to_apply.update(client_overrides)
+                add_log(db, task_id, f"CLIENT DEV: Applying client-level overrides: {client_overrides}")
+        except Exception:
+            pass
+    
+    # removed stray debug print
+    # Then apply endpoint-level dev rules (they override client rules when both match)
+    if endpoint.is_development_mode and endpoint.dev_rules_enabled:
+        try:
+            dev_rules = db.query(DevelopmentRule).filter(DevelopmentRule.endpoint_id == endpoint.id).all()
+            endpoint_overrides = _eval_rules_and_collect(dev_rules)
+            if endpoint_overrides:
+                # endpoint rules take precedence over client rules
+                overrides_to_apply.update(endpoint_overrides)
+                add_log(db, task_id, f"ENDPOINT DEV: Applying endpoint-level overrides: {endpoint_overrides}")
+        except Exception:
+            pass
+
+    # Apply collected overrides to the working payload
+    if overrides_to_apply:
+        for param, value in overrides_to_apply.items():
+            working_payload[param] = value
 
     # 3. Perform Standard Parameter Mapping using the (potentially modified) working_payload
     target_payload = {}
@@ -935,7 +827,8 @@ def run_task_in_thread(task_id: int,healthy_resources) -> (bool, int, str):
             t.retry_count += 1
             t.resource_id = resource.id
             t.resource_name = resource.name
-            t.target_payload = build_target_payload(db, t.endpoint_id, resource.id, t.source_payload,t.id)
+            # Pass client_id through so client-level dev rules can be applied
+            t.target_payload = build_target_payload(db, t.endpoint_id, resource.id, t.source_payload, t.id, client_id=t.client_id)
             log = f"Attempt {t.retry_count}/{t.max_retries} task [{t.id}] via '{resource.name}'"
             print(log)
             add_log(db, t.id, log)
@@ -1157,7 +1050,8 @@ def dashboard(request: Request):
             "path": e.path,
             "status": get_endpoint_status(db, e),
             # indicate development mode so templates can render a badge
-            "is_dev": bool(getattr(e, 'is_development_mode', False) or getattr(e, 'dev_hold_tasks', False))
+            # The badge should reflect whether Development Mode is active only.
+            "is_dev": bool(getattr(e, 'is_development_mode', False))
         })
 
     # Fetch recent tasks and stats (this logic is unchanged)
@@ -1337,11 +1231,74 @@ async def client_save(request: Request):
             ensure_clients_endpoint_nullable(engine)
         except Exception:
             pass
+
         cid = form_data.get('id')
         name = form_data.get('name')
         desc = form_data.get('description')
         token = form_data.get('token') or generate_token()
+        # client-level dev flag
+        is_dev_client = True if form_data.get('is_dev_client') in ('1', 'on', 'true', True) else False
+        # dev options from the form
+        dev_hold_tasks = True if form_data.get('dev_hold_tasks') in ('1', 'on', 'true', True) else False
+        dev_rules_enabled = True if form_data.get('dev_rules_enabled') in ('1', 'on', 'true', True) else False
         endpoint_ids = form_data.getlist('endpoint_ids') if hasattr(form_data, 'getlist') else []
+
+        # Parse submitted client dev rules early (for validation) but do not persist yet
+        dev_rules_raw = form_data.get('client_dev_rules_json') if hasattr(form_data, 'get') else None
+        parsed_rules = []
+        if dev_rules_raw:
+            try:
+                import json
+                parsed_rules = json.loads(dev_rules_raw) or []
+            except Exception:
+                parsed_rules = []
+
+        # Validation: if user requested Development Mode for the client, ensure at least
+        # one of: dev_hold_tasks, dev_rules_enabled, or at least one dev rule exists
+        if is_dev_client:
+            has_rules = bool(parsed_rules)
+            # If editing an existing client and no rules were submitted, check existing DB rules
+            if cid and not has_rules:
+                try:
+                    existing_count = db.query(ClientDevRule).filter(ClientDevRule.client_id == int(cid)).count()
+                    if existing_count > 0:
+                        has_rules = True
+                except Exception:
+                    has_rules = has_rules
+
+            if not (dev_hold_tasks or dev_rules_enabled or has_rules):
+                # Re-render the client form with an error message and bootstrap data preserved
+                all_endpoints = db.query(Endpoint).order_by(Endpoint.path).all()
+                # linked_endpoint_ids: prefer posted endpoint_ids, fall back to existing links when editing
+                linked = []
+                try:
+                    if endpoint_ids:
+                        linked = [int(x) for x in endpoint_ids]
+                    elif cid:
+                        linked = [l.endpoint_id for l in db.query(EndpointClientLink).filter(EndpointClientLink.client_id == int(cid)).all()]
+                except Exception:
+                    linked = []
+
+                # compute available rule keys from linked endpoints
+                available_rule_keys = set()
+                for e in all_endpoints:
+                    if linked and e.id in linked and getattr(e, 'required_params', None):
+                        for k in e.required_params:
+                            available_rule_keys.add(k)
+                available_rule_keys.update(['scope', 'ref'])
+
+                context = {
+                    'request': request,
+                    'client': db.query(Client).get(int(cid)) if cid else None,
+                    'generated_token': token,
+                    'all_endpoints': [{'id': e.id, 'path': e.path} for e in all_endpoints],
+                    'linked_endpoint_ids': linked,
+                    'available_rule_keys': sorted(list(available_rule_keys)),
+                    'client_dev_rules': parsed_rules,
+                    'error': 'Activating Development Mode requires either "Hold incoming tasks" or at least one Dev Rule.'
+                }
+                db.close()
+                return templates.TemplateResponse('client_form.html', context)
 
         # Unique client name validation on create
         if not cid:
@@ -1366,10 +1323,13 @@ async def client_save(request: Request):
             client.name = name
             client.description = desc
             client.token = token
+            client.is_dev_client = is_dev_client
+            client.dev_hold_tasks = dev_hold_tasks
+            client.dev_rules_enabled = dev_rules_enabled
             db.commit()
             client_id = client.id
         else:
-            new_client = Client(name=name.strip(), token=token, endpoint_id=None, description=desc)
+            new_client = Client(name=name.strip(), token=token, endpoint_id=None, description=desc, is_dev_client=is_dev_client, dev_hold_tasks=dev_hold_tasks, dev_rules_enabled=dev_rules_enabled)
             db.add(new_client)
             db.commit()
             db.refresh(new_client)
@@ -1377,13 +1337,49 @@ async def client_save(request: Request):
 
         # Update EndpointClientLink associations
         db.query(EndpointClientLink).filter(EndpointClientLink.client_id == client_id).delete()
+        inserted_links = 0
         for eid in endpoint_ids:
             try:
                 eid_int = int(eid)
             except Exception:
                 continue
             db.add(EndpointClientLink(endpoint_id=eid_int, client_id=client_id))
+            inserted_links += 1
         db.commit()
+        print(f'Inserted {inserted_links} endpoint links for client_id={client_id}')
+
+        # Persist client-level dev rules if provided (JSON blob)
+        try:
+            dev_rules_raw = form_data.get('client_dev_rules_json') if hasattr(form_data, 'get') else None
+            if dev_rules_raw:
+                import json
+                try:
+                    parsed = json.loads(dev_rules_raw)
+                    # delete existing rules for this client and insert new ones
+                    db.query(ClientDevRule).filter(ClientDevRule.client_id == client_id).delete()
+                    inserted = 0
+                    for r in parsed:
+                        try:
+                            cr = ClientDevRule(
+                                client_id=client_id,
+                                endpoint_id=r.get('endpoint_id') if r.get('endpoint_id') else None,
+                                condition_param=r.get('condition_param'),
+                                condition_value=r.get('condition_value'),
+                                target_param=r.get('target_param'),
+                                override_value=r.get('override_value'),
+                                active=bool(r.get('active', True))
+                            )
+                            db.add(cr)
+                            inserted += 1
+                        except Exception:
+                            continue
+                    print(f'Parsed and inserting {inserted} client dev rules for client_id={client_id}')
+                except Exception:
+                    print('Failed to parse client_dev_rules_json', dev_rules_raw)
+        except Exception:
+            pass
+        db.commit()
+
     finally:
         db.close()
 
@@ -1415,12 +1411,22 @@ def client_new_form(request: Request):
                     linked = []
         except Exception:
             linked = []
+        # compute available rule keys (union of required_params for linked endpoints)
+        available_rule_keys = set()
+        for e in all_endpoints:
+            if linked and e.id in linked and getattr(e, 'required_params', None):
+                for k in e.required_params:
+                    available_rule_keys.add(k)
+        available_rule_keys.update(['scope', 'ref'])
+
         context = {
             'request': request,
             'client': None,
             'generated_token': generate_token(),
             'all_endpoints': [{'id': e.id, 'path': e.path} for e in all_endpoints],
-            'linked_endpoint_ids': linked
+            'linked_endpoint_ids': linked,
+            'available_rule_keys': sorted(list(available_rule_keys)),
+            'client_dev_rules': []
         }
         return templates.TemplateResponse('client_form.html', context)
     finally:
@@ -1436,90 +1442,42 @@ def client_edit_form(request: Request, cid: int):
             raise HTTPException(404)
         all_endpoints = db.query(Endpoint).order_by(Endpoint.path).all()
         linked_ids = [l.endpoint_id for l in db.query(EndpointClientLink).filter(EndpointClientLink.client_id == cid).all()]
+        available_rule_keys = set()
+        for e in all_endpoints:
+            if e.id in linked_ids and getattr(e, 'required_params', None):
+                for k in e.required_params:
+                    available_rule_keys.add(k)
+        available_rule_keys.update(['scope', 'ref'])
+
+        # fetch existing client dev rules
+        client_rules = db.query(ClientDevRule).filter(ClientDevRule.client_id == cid).order_by(ClientDevRule.created_at).all()
+        client_rules_json = [
+            {
+                'id': r.id,
+                'endpoint_id': r.endpoint_id,
+                'condition_param': r.condition_param,
+                'condition_value': r.condition_value,
+                'target_param': r.target_param,
+                'override_value': r.override_value,
+                'active': bool(r.active)
+            } for r in client_rules
+        ]
+
         context = {
             'request': request,
             'client': client,
             'generated_token': client.token,
             'all_endpoints': [{'id': e.id, 'path': e.path} for e in all_endpoints],
-            'linked_endpoint_ids': linked_ids
+            'linked_endpoint_ids': linked_ids,
+            'available_rule_keys': sorted(list(available_rule_keys)),
+            'client_dev_rules': client_rules_json
         }
         return templates.TemplateResponse('client_form.html', context)
     finally:
         db.close()
 
 
-@app.post('/clients/save', include_in_schema=False, dependencies=[Depends(verify_session)])
-def client_save(request: Request):
-    form = request.form()
-    # Starlette's form() returns an awaitable; but using sync handler for simplicity
-    # We'll implement a simple sync-like handling: get form fields from Request._form if present
-    # To be safe, use request._form if available, otherwise raise.
-    try:
-        form_data = request._form
-    except Exception:
-        # Fallback: use awaitable - but since this is sync handler it's not ideal; raise for now
-        raise HTTPException(status_code=400, detail='Form submission not supported in sync handler')
 
-    db = SessionLocal()
-    try:
-        # Ensure historic DB schema (clients.endpoint_id) is nullable to avoid IntegrityError
-        try:
-            ensure_clients_endpoint_nullable(engine)
-        except Exception:
-            pass
-        cid = form_data.get('id')
-        name = form_data.get('name')
-        desc = form_data.get('description')
-        token = form_data.get('token') or generate_token()
-        endpoint_ids = form_data.getlist('endpoint_ids') if hasattr(form_data, 'getlist') else []
-
-        if cid:
-            client = db.query(Client).get(int(cid))
-            if not client:
-                raise HTTPException(404)
-            client.name = name
-            # store description in a tokenized manner if Client model lacks description column
-            try:
-                client.description = desc
-            except Exception:
-                pass
-            client.token = token
-            db.commit()
-            client_id = client.id
-        else:
-            new_client = Client(name=name.strip(), token=token, endpoint_id=None)
-            try:
-                new_client.description = desc
-            except Exception:
-                pass
-            db.add(new_client)
-            db.commit()
-            db.refresh(new_client)
-            client_id = new_client.id
-
-        # Update EndpointClientLink associations
-        db.query(EndpointClientLink).filter(EndpointClientLink.client_id == client_id).delete()
-        for eid in endpoint_ids:
-            try:
-                eid_int = int(eid)
-            except Exception:
-                continue
-            db.add(EndpointClientLink(endpoint_id=eid_int, client_id=client_id))
-        db.commit()
-    finally:
-        db.close()
-
-    # honor return_to if provided in the (possibly sync) form
-    try:
-        ret = None
-        if hasattr(form_data, 'get'):
-            ret = form_data.get('return_to')
-        if ret:
-            return RedirectResponse(ret, status_code=303)
-    except Exception:
-        pass
-
-    return RedirectResponse('/clients', status_code=303)
 
 @app.post("/clients/delete/{cid}", include_in_schema=False, dependencies=[Depends(verify_session)])
 def clients_delete(cid: int):
@@ -2546,6 +2504,75 @@ def endpoints_delete(eid: int):
     
     return RedirectResponse("/endpoints", status_code=303)
 
+
+@app.post('/endpoints/duplicate/{eid}', include_in_schema=False, dependencies=[Depends(verify_session)])
+def endpoints_duplicate(eid: int):
+    """
+    Duplicate an endpoint including its resource links, parameter rules,
+    development rules, and client associations. The new endpoint will have
+    " copy" appended to its path to help ensure uniqueness; if that path
+    exists, a numeric suffix is appended.
+    """
+    db = SessionLocal()
+    new_id = None
+    try:
+        src = db.query(Endpoint).get(eid)
+        if not src:
+            db.close()
+            return RedirectResponse('/endpoints', status_code=303)
+
+        # Build a unique path for the duplicate
+        base_path = f"{src.path} copy"
+        new_path = base_path
+        suffix = 1
+        while db.query(Endpoint).filter(Endpoint.path == new_path).first():
+            suffix += 1
+            new_path = f"{base_path} {suffix}"
+
+        new_ep = Endpoint(
+            path=new_path,
+            description=src.description,
+            required_params=src.required_params,
+            is_development_mode=src.is_development_mode,
+            dev_hold_tasks=src.dev_hold_tasks,
+            dev_rules_enabled=src.dev_rules_enabled,
+            is_active=src.is_active,
+            dev_values=src.dev_values
+        )
+        db.add(new_ep)
+        db.commit()
+        db.refresh(new_ep)
+
+        # Duplicate resource links with same sequence
+        links = db.query(EndpointResourceLink).filter(EndpointResourceLink.endpoint_id == eid).order_by(EndpointResourceLink.sequence).all()
+        for link in links:
+            db.add(EndpointResourceLink(endpoint_id=new_ep.id, resource_id=link.resource_id, sequence=link.sequence))
+
+        # Duplicate parameter rules
+        param_rules = db.query(ParameterRule).filter(ParameterRule.endpoint_id == eid).all()
+        for pr in param_rules:
+            db.add(ParameterRule(endpoint_id=new_ep.id, resource_id=pr.resource_id, target_key=pr.target_key, source_type=pr.source_type, source_value=pr.source_value))
+
+        # Duplicate development rules
+        dev_rules = db.query(DevelopmentRule).filter(DevelopmentRule.endpoint_id == eid).all()
+        for dr in dev_rules:
+            db.add(DevelopmentRule(endpoint_id=new_ep.id, condition_param=dr.condition_param, condition_value=dr.condition_value, target_param=dr.target_param, override_value=dr.override_value))
+
+        # Duplicate client links
+        client_links = db.query(EndpointClientLink).filter(EndpointClientLink.endpoint_id == eid).all()
+        for cl in client_links:
+            db.add(EndpointClientLink(endpoint_id=new_ep.id, client_id=cl.client_id))
+
+        db.commit()
+        # capture the new endpoint id before closing the session to avoid DetachedInstanceError
+        new_id = new_ep.id
+    finally:
+        db.close()
+
+    if new_id:
+        return RedirectResponse(f"/endpoints/edit/{new_id}", status_code=303)
+    return RedirectResponse('/endpoints', status_code=303)
+
 # --- Parameter Rules ---
 @app.get("/rules/{endpoint_id}",include_in_schema=False, response_class=HTMLResponse)
 def rules_view(endpoint_id: int):
@@ -2775,19 +2802,25 @@ async def api_dynamic(
         if max_delay < min_delay:
             max_delay = min_delay
         delay = random.randint(min_delay, max_delay)
-        # Create the task in a 'pending' state by default. However, when the
-        # endpoint is in development mode and configured to hold tasks for
-        # testing, mark it as 'dev' so workers won't process it.
+        # Create the task in a 'pending' state by default. Client-level
+        # rules are evaluated first; if any active client rule matches the
+        # incoming payload the task will be marked as 'dev' (held). Next we
+        # fall back to per-client global flag, then endpoint defaults.
         initial_status = "pending"
-        if endpoint.is_development_mode and getattr(endpoint, 'dev_hold_tasks', False):
-            initial_status = "dev"
+        # If no client rule matched, check global client-level dev hold flag, then endpoint
+
+        # Only hold a task for a client when dev mode is explicitly enabled AND
+        # the client has opted to 'hold' incoming tasks.
+        if (client.is_dev_client and client.dev_hold_tasks) or (endpoint.is_development_mode and endpoint.dev_hold_tasks):
+            initial_status = 'dev'
 
         t = Task(
-            endpoint_id=endpoint.id, 
-            endpoint_path=endpoint.path, 
+            endpoint_id=endpoint.id,
+            endpoint_path=endpoint.path,
             source_payload=payload,
-            client_name=client.name, 
-            ref_id=ref_id, 
+            client_name=client.name,
+            client_id=client.id if client else None,
+            ref_id=ref_id,
             scope=scope,
             status=initial_status,
             attempts=0,
@@ -2795,12 +2828,14 @@ async def api_dynamic(
             max_retries=max_retries,
             delay=delay,
         )
+        try:
+            print(f"Final payload before task create: {json.dumps(payload) if isinstance(payload, dict) else str(payload)}")
+        except Exception:
+            pass
         db.add(t)
         db.commit()
         db.refresh(t)
-        
-        add_log(db, t.id, f"API task from client '{client.name}' created and is pending execution.")
-            
+
         return JSONResponse({"status": "queued", "task_id": t.id})
     finally:
         db.close()
