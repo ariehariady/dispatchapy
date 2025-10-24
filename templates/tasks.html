@@ -17,7 +17,7 @@
             </form>
         </div>
 
-        <form method="post" action="/tasks/batch_delete" id="batch-delete-form" onsubmit="return confirm('Are you sure you want to delete the selected tasks? This action cannot be undone.');">
+    <form method="post" action="/tasks/batch_delete" id="batch-delete-form">
         <div class="overflow-x-auto">
             <table class="min-w-full text-sm">
                 <thead class="bg-gray-100">
@@ -29,13 +29,13 @@
                         <th class="px-3 py-2 text-left">Endpoint</th>
                         <th class="px-3 py-2 text-left">Resource Used</th> <th class="px-3 py-2 text-left">Status</th>
                         <th class="px-3 py-2 text-left">Created</th>
-                        <th class="px-3 py-2 text-left">Action</th>
+                        <th class="px-3 py-2"></th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for t in tasks %}
                     <tr class="border-t">
-                        <td class="px-3 py-2"><input type="checkbox" name="task_ids" value="{{ t.id }}"></td>
+                        <td class="px-3 py-2"><input type="checkbox" name="task_ids" value="{{ t.id }}" data-status="{{ t.status }}"></td>
                         <td class="px-3 py-2">{{ t.id }}</td>
                         <td class="px-3 py-2">{{ t.client_name or 'N/A' }}</td>
                         <td class="px-3 py-2 text-xs">
@@ -45,8 +45,15 @@
                         <td class="px-3 py-2">{{ t.endpoint_path }}</td>
                         <td class="px-3 py-2">{{ t.resource_name or 'N/A' }}</td> <td class="px-3 py-2">{{ t.status }}</td>
                         <td class="px-3 py-2">{{ t.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
-                        <td class="px-3 py-2">
-                            <a class="text-blue-600" href="/task/{{ t.id }}">View</a>
+                        
+                        <td class="action-btns px-3 py-2 text-right">
+                            <a class="px-3 py-1 bg-green-600 text-white rounded text-xs" href="/task/{{ t.id }}">Detail</a>
+                            {% if t.status in ['pending'] %}
+                                <button type="button" class="stop-task-btn px-3 py-1 bg-yellow-600 text-white rounded text-xs" data-tid="{{ t.id }}">Stop</button>
+                            {% endif %}
+                            {% if t.status not in ['processing'] %}
+                                <button type="button" class="delete-task-btn px-3 py-1 bg-red-600 text-white rounded text-xs" data-tid="{{ t.id }}">Delete</button>
+                            {% endif %}
                         </td>
                     </tr>
                     {% else %}
@@ -60,10 +67,61 @@
         <div class="mt-4">
             <!-- Hidden by default; will be shown when at least one task is selected -->
             <button type="submit" class="px-4 py-2 bg-red-600 text-white rounded" id="batch-delete-btn" style="display:none;" disabled>Delete</button>
+            <div id="batch-delete-warning" class="text-sm text-red-600 mt-2" style="display:none;">cannot delete processing task</div>
         </div>
         </form>
     </div>
     <script>
+    // Stop and Delete Task Button Handlers
+    document.addEventListener('DOMContentLoaded', function() {
+        document.querySelectorAll('.stop-task-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const tid = btn.getAttribute('data-tid');
+                if (!tid) return;
+                if (!confirm('Are you sure you want to stop this pending task?')) return;
+                btn.disabled = true;
+                btn.textContent = 'Stopping...';
+                try {
+                    const resp = await fetch(`/task/${tid}/stop`, { method: 'POST', credentials: 'same-origin', headers: { 'Accept': 'application/json' }});
+                    if (!resp.ok) {
+                        alert('Failed to stop task: ' + resp.status);
+                        btn.disabled = false;
+                        btn.textContent = 'Stop';
+                        return;
+                    }
+                    window.location.reload();
+                } catch (err) {
+                    alert('Failed to stop task: ' + err);
+                    btn.disabled = false;
+                    btn.textContent = 'Stop';
+                }
+            });
+        });
+        document.querySelectorAll('.delete-task-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const tid = btn.getAttribute('data-tid');
+                if (!tid) return;
+                if (!confirm('Are you sure you want to delete this task? This action cannot be undone.')) return;
+                btn.disabled = true;
+                btn.textContent = 'Deleting...';
+                try {
+                    const resp = await fetch(`/task/${tid}/delete`, { method: 'POST', credentials: 'same-origin', headers: { 'Accept': 'application/json' }});
+                    if (!resp.ok) {
+                        alert('Failed to delete task: ' + resp.status);
+                        btn.disabled = false;
+                        btn.textContent = 'Delete';
+                        return;
+                    }
+                    window.location.reload();
+                } catch (err) {
+                    alert('Failed to delete task: ' + err);
+                    btn.disabled = false;
+                    btn.textContent = 'Delete';
+                }
+            });
+        });
+
+    });
     function toggleAllTasks(source) {
         const checkboxes = document.querySelectorAll('input[name="task_ids"]');
         for (const cb of checkboxes) {
@@ -78,17 +136,53 @@
         }
         // Ensure correct initial state (hidden when no selection)
         toggleDeleteBtn();
+
+        // Prevent batch delete submission if any selected tasks are processing
+        const batchForm = document.getElementById('batch-delete-form');
+        if (batchForm) {
+            batchForm.addEventListener('submit', function(e) {
+                if (isProcessingSelected()) {
+                    e.preventDefault();
+                    alert('Cannot delete processing task(s). Please unselect processing tasks and try again.');
+                } else {
+                    // Confirm action before submitting
+                    if (!confirm('Are you sure you want to delete the selected tasks? This action cannot be undone.')) {
+                        e.preventDefault();
+                    }
+                }
+            });
+        }
     });
+
+    function isProcessingSelected() {
+        const checkboxes = document.querySelectorAll('input[name="task_ids"]');
+        return Array.from(checkboxes).some(cb => cb.checked && cb.dataset && cb.dataset.status === 'processing');
+    }
+
     function toggleDeleteBtn() {
         const checkboxes = document.querySelectorAll('input[name="task_ids"]');
+        const action_btns = document.querySelectorAll('.action-btns');
         const btn = document.getElementById('batch-delete-btn');
+        const warning = document.getElementById('batch-delete-warning');
         const anyChecked = checkboxes.length > 0 && Array.from(checkboxes).some(cb => cb.checked);
-        if (anyChecked) {
+        const processingSelected = isProcessingSelected();
+        if (anyChecked && !processingSelected) {
             btn.style.display = '';
             btn.disabled = false;
+            action_btns.forEach(ab => { ab.style.display = 'none'; });
+            if (warning) warning.style.display = 'none';
+        } else if (anyChecked && processingSelected) {
+            // Hide delete button and show warning when any selected task is processing
+            if (btn) btn.style.display = 'none';
+            if (btn) btn.disabled = true;
+            if (warning) warning.style.display = '';
+            action_btns.forEach(ab => { ab.style.display = ''; });
+
         } else {
-            btn.style.display = 'none';
-            btn.disabled = true;
+            if (btn) btn.style.display = 'none';
+            if (btn) btn.disabled = true;
+            if (warning) warning.style.display = 'none';
+            action_btns.forEach(ab => { ab.style.display = ''; });
         }
     }
     </script>

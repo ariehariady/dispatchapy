@@ -1,13 +1,23 @@
 {% extends 'base.html' %}
 {% block content %}
 
-<div class="bg-white p-6 rounded-lg shadow-sm" x-data="{ isDevMode: {{ 'true' if client and client.is_dev_client else 'false' }}, devRulesEnabled: {{ 'true' if client_dev_rules and client_dev_rules|length > 0 else 'false' }} }">
-    <h2 class="text-lg font-semibold mb-4">{% if client %}Edit Client: {{ client.name }}{% else %}Create New Client{% endif %}</h2>
+<div class="bg-white p-6 rounded-lg shadow-sm" x-data='{
+    devRulesEnabled: {{ ( ((client_dev_rules | default([]) | length) > 0) or (client.dev_rules_enabled if client else False) ) | tojson }}
+}'>
+    <h2 class="text-lg font-semibold mb-4">
+        {% if is_client %}
+        Client Settings: {{ client.name if client else '' }}
+        {% elif client %}
+        Edit Client: {{ client.name }}
+        {% else %}
+        Create New Client
+        {% endif %}</h2>
     {% if error %}
         <script>try { alert({{ error | tojson | safe }}); } catch(e) { console.error('alert error', e); }</script>
     {% endif %}
     <form method="post" action="/clients/save" id="client-form">
         <div class="grid grid-cols-1 gap-4">
+            {% if not is_client %}
             <div>
                 <label class="text-sm font-medium">Name</label>
                 <input name="name" class="p-2 border rounded w-full mt-1" value="{{ client.name if client else '' }}" required />
@@ -16,11 +26,15 @@
                 <label class="text-sm font-medium">Description</label>
                 <input name="description" class="p-2 border rounded w-full mt-1" value="{{ client.description if client else '' }}" />
             </div>
+            {% endif %}
             <div>
                 <label class="text-sm font-medium">Token</label>
                 <div class="flex items-center gap-2">
-                    <input name="token" class="p-2 border rounded w-full mt-1 font-mono" value="{{ client.token if client else generated_token }}" readonly />
-                    <button type="button" id="regen-token" class="px-3 py-2 bg-gray-600 text-white rounded">Regenerate</button>
+                    <input name="token" id="client-token-input" class="p-2 border rounded w-full mt-1 font-mono" value="{{ client.token if client else generated_token }}" readonly />
+                    <button type="button" id="copy-token" class="px-3 py-2 bg-gray-200 text-gray-800 rounded" title="Copy token">Copy</button>
+                    {% if not is_client %}
+                    <button type="button" id="regen-token" class="px-3 py-2 bg-gray-600 text-white rounded" {% if is_client %}disabled title="Administrators only"{% endif %}>Regenerate</button>
+                    {% endif %}
                 </div>
             </div>
             <div class="border p-3 rounded">
@@ -34,52 +48,45 @@
                                 <div class="flex items-center gap-2" data-eid="{{ e.id }}">
                                     <input type="hidden" name="endpoint_ids" value="{{ e.id }}">
                                     <input type="text" class="p-2 border rounded bg-gray-100 flex-grow" value="/api/{{ e.path }}{% if e.description %} — {{ e.description }}{% endif %}" readonly>
-                                    <button type="button" class="px-3 py-2 bg-red-600 text-white rounded w-20" onclick="this.parentElement.remove()">Remove</button>
+                                    {% if not is_client %}  
+                                    <button type="button" class="px-3 py-2 bg-red-600 text-white rounded w-20" onclick="this.parentElement.remove()" {% if is_client %}disabled title="Administrators only"{% endif %}>Remove</button>
+                                    {% endif %}
                                 </div>
                             {% endif %}
                         {% endfor %}
                     {% endif %}
                 </div>
+                {% if not is_client %}  
                 <div class="flex items-center gap-2 mt-3 pt-3 border-t">
-                    <select id="available-endpoint-select" class="p-2 border rounded flex-grow">
+                    <select id="available-endpoint-select" class="p-2 border rounded flex-grow" {% if is_client %}disabled title="Administrators only"{% endif %}>
                         <option value="">-- Select endpoint to add --</option>
                         {% for e in all_endpoints %}
                             <option value="{{ e.id }}">/api/{{ e.path }}{% if e.description %} — {{ e.description }}{% endif %}</option>
                         {% endfor %}
                     </select>
-                    <button type="button" id="add-endpoint-btn" class="px-3 py-2 bg-gray-600 text-white rounded w-20">Add</button>
+                    <button type="button" id="add-endpoint-btn" class="px-3 py-2 bg-gray-600 text-white rounded w-20" {% if is_client %}disabled title="Administrators only"{% endif %}>Add</button>
                 </div>
+                {% endif %}
             </div>
             <div x-show="true" class="border p-3 rounded">
-                    <div class="flex justify-between items-center mb-3 pb-2 border-b">
-                        <!-- Toggle acts as the section label -->
-                            <div class="flex items-center space-x-3">
-                                <button type="button" @click="isDevMode = !isDevMode" :class="isDevMode ? 'bg-green-500' : 'bg-gray-200'" class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors">
-                                    <span :class="isDevMode ? 'translate-x-6' : 'translate-x-1'" class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform"></span>
-                                </button>
-                                <label class="text-sm font-medium">Development Mode</label>
-                            </div>
-                            <!-- Hidden input so server receives dev mode state when the rules form is submitted -->
-                            <input type="hidden" name="is_dev_client" :value="isDevMode ? '1' : '0'">
-
-                    </div>
-                    <div class="mb-4 px-3" x-show="isDevMode" style="display: none;">
+                <label class="text-sm font-medium mb-4">Task Overrides</label>
+                    <div class="mb-4 mt-3">
                         <label class="inline-flex items-center space-x-2">
                             <input type="checkbox" name="dev_hold_tasks" value="1" class="form-checkbox h-4 w-4 text-indigo-600"
                                 {% if client and client.dev_hold_tasks %}checked{% endif %}>
                             <span class="text-sm text-gray-700">Hold incoming tasks for manual inspection (place into <code>dev</code> state)</span>
                         </label>
-                        <p class="text-xs text-gray-500 mt-1">When enabled and Development Mode is active, incoming requests will be recorded but not processed by workers.</p>
+                        <p class="text-xs text-gray-500 mt-1">When enabled, incoming requests will be recorded but not processed by workers.</p>
                     </div>
-                    <div class="mb-4 px-3" x-show="isDevMode" style="display: none;">
+                    <div class="mb-4">
                         <label class="inline-flex items-center space-x-2">
                             <input type="checkbox" name="dev_rules_enabled" value="1" x-model="devRulesEnabled" class="form-checkbox h-4 w-4 text-indigo-600"
-                                {% if client_dev_rules is defined and client_dev_rules %}checked{% elif client and (client.dev_rules_enabled if client is defined else False) %}checked{% endif %}>
-                            <span class="text-sm text-gray-700">Activate development rules (allow overrides defined below)</span>
+                                {% if client and client.dev_rules_enabled %}checked{% endif %}>
+                            <span class="text-sm text-gray-700">Apply Override rules</span>
                         </label>
-                        <p class="text-xs text-gray-500 mt-1">When enabled and Development Mode is active, the rules below will be applied to incoming requests.</p>
+                        <p class="text-xs text-gray-500 mt-1">When enabled, the rules below will be applied to incoming requests.</p>
                     </div>
-                    <div x-show="isDevMode && devRulesEnabled" style="display: none;">
+                    <div x-show="devRulesEnabled" style="display: none;">
 
                     <!-- Dev Section: Option to hold incoming tasks in dev state -->
 
@@ -121,6 +128,7 @@
 
     function createEndpointRow(eid, label) {
         if (!eid) return;
+        if (!endpointsContainer) return;
         if (Array.from(endpointsContainer.querySelectorAll('[data-eid]')).some(el => el.dataset.eid === String(eid))) return;
         const row = document.createElement('div');
         row.className = 'flex items-center gap-2';
@@ -129,13 +137,15 @@
         endpointsContainer.appendChild(row);
     }
 
-    addEndpointBtn.addEventListener('click', () => {
-        const val = availableEndpointSelect.value;
-        if (!val) return;
-        const label = availableEndpointSelect.options[availableEndpointSelect.selectedIndex].text;
-        createEndpointRow(val, label);
-        availableEndpointSelect.value = '';
-    });
+    if (addEndpointBtn && availableEndpointSelect) {
+        addEndpointBtn.addEventListener('click', () => {
+            const val = availableEndpointSelect.value;
+            if (!val) return;
+            const label = availableEndpointSelect.options[availableEndpointSelect.selectedIndex].text;
+            createEndpointRow(val, label);
+            availableEndpointSelect.value = '';
+        });
+    }
 
     // If opened with ?endpoint_id=..., pre-populate that endpoint in the associated endpoints list
     (function(){
@@ -144,11 +154,18 @@
             const pre = params.get('endpoint_id');
             if (pre) {
                 // try to find the option label
-                const opt = Array.from(availableEndpointSelect.options).find(o => o.value === String(pre));
-                const label = opt ? opt.text : ('/api/' + pre);
-                createEndpointRow(pre, label);
-                // remove the option from the select if we found it
-                try { if (opt) opt.remove(); } catch(e) {}
+                try {
+                    if (availableEndpointSelect) {
+                        const opt = Array.from(availableEndpointSelect.options).find(o => o.value === String(pre));
+                        const label = opt ? opt.text : ('/api/' + pre);
+                        createEndpointRow(pre, label);
+                        // remove the option from the select if we found it
+                        try { if (opt) opt.remove(); } catch(e) {}
+                    } else {
+                        // no select present, still attempt to create a row with a simple label
+                        createEndpointRow(pre, '/api/' + pre);
+                    }
+                } catch(e) {}
                 // add a hidden return_to field so the server can redirect back to the endpoint's clients page after save
                 try {
                     const form = document.getElementById('client-form');
@@ -169,23 +186,57 @@
             if (Array.isArray(linked) && linked.length) {
                 linked.forEach(id => {
                     try {
-                        const opt = Array.from(availableEndpointSelect.options).find(o => o.value === String(id));
-                        const label = opt ? opt.text : ('/api/' + id);
-                        createEndpointRow(id, label);
-                        try { if (opt) opt.remove(); } catch(e) {}
+                        if (availableEndpointSelect) {
+                            const opt = Array.from(availableEndpointSelect.options).find(o => o.value === String(id));
+                            const label = opt ? opt.text : ('/api/' + id);
+                            createEndpointRow(id, label);
+                            try { if (opt) opt.remove(); } catch(e) {}
+                        } else {
+                            createEndpointRow(id, '/api/' + id);
+                        }
                     } catch(e) { /* ignore per-row errors */ }
                 });
             }
         } catch(e) { /* ignore if not available */ }
     })();
 
-    document.getElementById('regen-token').addEventListener('click', () => {
-        // lightweight token regeneration UI: request a new token from server endpoint if available
-        // For now just generate a client-side random token placeholder (server will override on save)
-        const tokenInput = document.querySelector('input[name=token]');
-        try { tokenInput.value = 'dpy_' + Math.random().toString(36).slice(2,12) + Math.random().toString(36).slice(2,12); } catch(e){}
-    });
+    try {
+        const regenBtn = document.getElementById('regen-token');
+        if (regenBtn) regenBtn.addEventListener('click', () => {
+            // lightweight token regeneration UI: request a new token from server endpoint if available
+            // For now just generate a client-side random token placeholder (server will override on save)
+            const tokenInput = document.querySelector('input[name=token]');
+            try { tokenInput.value = 'dpy_' + Math.random().toString(36).slice(2,12) + Math.random().toString(36).slice(2,12); } catch(e){}
+        });
+    } catch(e) { /* noop */ }
+
+    // copy token button handler (safe-guarded for when the button exists)
+    try {
+        const copyBtn = document.getElementById('copy-token');
+        if (copyBtn) {
+            copyBtn.addEventListener('click', () => {
+                const tokenInput = document.querySelector('input[name=token]');
+                if (!tokenInput) return;
+                const val = tokenInput.value || '';
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(val).then(() => {
+                        const orig = copyBtn.innerHTML;
+                        copyBtn.innerHTML = 'Copied';
+                        try { alert('Token has copied to clipboard'); } catch(e) {}
+                        setTimeout(() => { copyBtn.innerHTML = orig; }, 2000);
+                    }).catch(() => {
+                        // fallback to execCommand
+                        try { tokenInput.select(); document.execCommand('copy'); copyBtn.innerHTML = 'Copied'; try { alert('Token has copied to clipboard'); } catch(e) {} setTimeout(()=>copyBtn.innerHTML = 'Copy',2000);} catch(e){ alert('Copy failed'); }
+                    });
+                } else {
+                    // older browsers
+                    try { tokenInput.select(); document.execCommand('copy'); copyBtn.innerHTML = 'Copied'; try { alert('Token has copied to clipboard'); } catch(e) {} setTimeout(()=>copyBtn.innerHTML = 'Copy',2000);} catch(e){ alert('Copy not supported in this browser'); }
+                }
+            });
+        }
+    } catch(e) { /* noop if DOM APIs not available */ }
 
     // client rules UI moved to /statics/client_rules.js
 </script>
+
 {% endblock %}

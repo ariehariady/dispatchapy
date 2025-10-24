@@ -1,6 +1,49 @@
 {% extends 'base.html' %}
-    {% block content %}
-    <div class="w-full bg-white rounded shadow">
-        <iframe src="/docs" frameborder="0" style="width: 100%; height: 80vh;"></iframe>
-    </div>
-    {% endblock %}
+{% block content %}
+<div class="mb-6 bg-white p-6 rounded shadow">
+    <!-- Custom Swagger UI embed for per-user OpenAPI docs -->
+    <div id="swagger-ui"></div>
+</div>
+<link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@4.15.5/swagger-ui.css">
+<script src="https://unpkg.com/swagger-ui-dist@4.15.5/swagger-ui-bundle.js"></script>
+<script>
+    window.onload = function() {
+        function getCookie(name) {
+            const value = `; ${document.cookie}`;
+            const parts = value.split(`; ${name}=`);
+            if (parts.length === 2) return parts.pop().split(';').shift();
+            return null;
+        }
+
+        const ui = SwaggerUIBundle({
+            url: '/openapi-user.json',
+            dom_id: '#swagger-ui',
+            presets: [
+                SwaggerUIBundle.presets.apis,
+                SwaggerUIBundle.SwaggerUIStandalonePreset
+            ],
+            layout: "BaseLayout",
+            deepLinking: true,
+            showExtensions: true,
+            showCommonExtensions: true,
+            // If the user has a client session cookie, automatically add it
+            // to outgoing requests as the X-API-Token header so the "Try it out"
+            // button works for client sessions.
+            requestInterceptor: (req) => {
+                try {
+                    const clientToken = getCookie('client_session_token');
+                    if (clientToken) {
+                        req.headers = req.headers || {};
+                        // Set the conventional header name used by the gateway
+                        req.headers['X-API-Token'] = clientToken;
+                    }
+                } catch (e) {
+                    console.warn('Failed to inject client token into Swagger requests', e);
+                }
+                return req;
+            }
+        });
+        window.ui = ui;
+    };
+</script>
+{% endblock %}

@@ -20,7 +20,9 @@
                     <div class="text-sm"><strong>{{ r.name }}</strong></div>
                     <div class="flex items-center space-x-2">
                         <a href="/resources/{{ r.id }}/history" class="text-xs text-gray-600 hover:underline">History</a>
+                        {% if not is_client %}
                         <button data-rid="{{ r.id }}" class="manual-check-btn text-xs text-green-600 hover:underline">Check</button>
+                        {% endif %}
                     </div>
                 </div>
                 <div class="text-xs text-gray-600 mt-1">Status: 
@@ -49,6 +51,9 @@
                         {% if e.is_dev %}
                         <span class="px-2 py-1 text-xs font-semibold text-yellow-800 bg-yellow-200 rounded-full">Dev</span>
                         {% endif %}
+                        {% if not is_client %}
+                        <!-- Admin-only status badge styling retained above; additional admin actions could go here -->
+                        {% endif %}
                         {% if e.status == 'Ready' %}
                         <span class="px-2 py-1 text-xs font-semibold text-green-800 bg-green-200 rounded-full">{{ e.status }}</span>
                         {% else %}
@@ -74,7 +79,7 @@
                 <th class="px-3 py-2 text-left">Endpoint</th>
                 <th class="px-3 py-2 text-left">Ref / Scope</th>
                 <th class="px-3 py-2 text-left">Status</th>
-                <th class="px-3 py-2 text-left">Action</th>
+                <th class="px-3 py-2 text-left"></th>
                 </tr>
             </thead>
             <tbody>
@@ -88,8 +93,11 @@
                     <div><strong>Scope:</strong> {{ t.scope }}</div>
                 </td>
                 <td class="px-3 py-2">{{ t.status }}</td>
-                <td class="px-3 py-2">
-                    <a class="text-blue-600" href="/task/{{ t.id }}">View</a>
+                <td class="px-3 py-2 text-right">
+                    <a class="px-3 py-1 bg-green-600 text-white rounded text-xs" href="/task/{{ t.id }}">View</a>
+                    {% if t.status in ['pending'] %}
+                        <button type="button" class="stop-task-btn px-3 py-1 bg-yellow-600 text-white rounded text-xs" data-tid="{{ t.id }}">Stop</button>
+                    {% endif %}
                 </td>
                 </tr>
                 {% else %}

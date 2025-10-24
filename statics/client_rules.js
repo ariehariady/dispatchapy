@@ -88,14 +88,26 @@
         } catch(e) { console.error('client_rules.js: serializeRulesToHidden error', e); return []; }
     }
 
-    // populate existing rules or a blank one (only if container exists)
+    // populate existing rules or a blank one (only if the client actually has Dev Mode / dev-rules enabled)
     try {
         const rcCheck = document.getElementById('dev-rules-container') || document.getElementById('client-rules-container');
         if (rcCheck) {
             if (Array.isArray(existingRules) && existingRules.length) {
+                // populate real existing rules
                 for (const r of existingRules) createDevRuleRow(r);
             } else {
-                createDevRuleRow({});
+                // Only create a blank rule row when Dev Mode and Dev Rules are actually enabled.
+                const devRulesCheckbox = document.querySelector('input[name="dev_rules_enabled"]');
+                const devModeHidden = document.querySelector('input[name="is_dev_client"]');
+                let devModeOn = false;
+                try {
+                    // Removed reliance on is_dev_client
+                    // devModeOn = devModeHidden && ['1','true','on','True'].includes(String(devModeHidden.value));
+                } catch(e) { devModeOn = false; }
+
+                if (devRulesCheckbox && devRulesCheckbox.checked) {
+                    createDevRuleRow({});
+                }
             }
         } else {
             // container not present yet; try to populate later when user expands Dev Mode
@@ -118,19 +130,29 @@
         }
     });
 
-        // If the user toggles Dev Mode on, ensure at least one blank rule row is present
-        document.addEventListener('click', function(e){
-            const target = e.target || e.srcElement;
-            if (!target) return;
-            // detect clicks on the dev mode toggle button (heuristic: a nearby button)
-            if (target.closest && (target.closest('button') || target.matches('button'))) {
-                const rc = document.getElementById('dev-rules-container') || document.getElementById('client-rules-container');
-                if (rc && rc.children.length === 0) {
-                    // defer slightly to allow Alpine to manage visibility
-                    setTimeout(() => { try { const rc2 = document.getElementById('dev-rules-container') || document.getElementById('client-rules-container'); if (rc2 && rc2.children.length === 0) createDevRuleRow({}); } catch(e){} }, 50);
-                }
+        // When the user enables the "Activate development rules" checkbox,
+        // ensure at least one blank rule row is present so the UI is ready to edit.
+        // Avoid creating a blank rule on arbitrary button clicks (which caused
+        // accidental empty rules to be serialized on save).
+        (function(){
+            const rcGetter = () => document.getElementById('dev-rules-container') || document.getElementById('client-rules-container');
+            const devRulesCheckbox = document.querySelector('input[name="dev_rules_enabled"]');
+            if (devRulesCheckbox) {
+                devRulesCheckbox.addEventListener('change', function(){
+                    try {
+                        const rc = rcGetter();
+                        if (!rc) return;
+                        if (this.checked && rc.children.length === 0) {
+                            // Create a blank editable row and serialize immediately.
+                            createDevRuleRow({});
+                            try { serializeRulesToHidden(); } catch(e){}
+                        }
+                    } catch(e) {
+                        // best-effort
+                    }
+                });
             }
-        });
+        })();
 
     // event delegation for remove
     // event delegation for remove (lookup container at runtime)
@@ -170,7 +192,7 @@
 
                 console.debug('client_rules.js: submit', { devModeHiddenValue: devModeHidden && devModeHidden.value, devModeOn, rulesEnabled });
 
-                if (devModeOn && rulesEnabled) {
+                if (rulesEnabled) {
                     const rc = document.getElementById('dev-rules-container') || document.getElementById('client-rules-container');
                     const rows = Array.from((rc && rc.querySelectorAll('div')) || []);
                     let anyValid = false;
@@ -200,15 +222,9 @@
 
                         out.push({ endpoint_id: null, condition_param: conditionParam ? conditionParam.value : null, condition_value: conditionValue ? conditionValue.value : null, target_param: target ? target.value : null, override_value: overrideVal ? overrideVal.value : null, active: true });
                     }
-
-                    if (!anyValid) {
+                    if (!anyValid || invalids.length > 0) {
                         // prevent submit and show simple alert (mirrors rules.html behavior)
                         e.preventDefault();
-                        const errEl = document.getElementById('dev-rules-error');
-                        if (errEl) {
-                            errEl.textContent = 'Please add at least one development rule with a target and override value (and a condition value if the rule is conditional), or disable development rules.';
-                            errEl.classList.remove('hidden');
-                        }
                         for (const inv of invalids) if (inv) inv.classList.add('border-red-600');
                         console.debug('client_rules.js: submit prevented - no valid rules', { rowsCount: rows.length, invalidsCount: invalids.length, out });
                         return false;
@@ -234,6 +250,15 @@
                 try { const hidden = document.getElementById('client_dev_rules_json'); if (hidden && !hidden.value) hidden.value = JSON.stringify([]); } catch(e){}
             }
         });
+    }
+
+    // Expose a helper so external scripts (client submit handler) can force
+    // serialization of current in-memory rules into the hidden input before
+    // performing validation or submitting via fetch.
+    try {
+        window.__DPY_SERIALIZE_RULES = serializeRulesToHidden;
+    } catch (e) {
+        /* best-effort */
     }
 
 })();

@@ -17,12 +17,13 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field, create_model
 import requests
-from fastapi import FastAPI, Request, Form, HTTPException, Path, Body, Header
+from fastapi import FastAPI, Request, Form, HTTPException, Path, Body, Header, Query
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.openapi.utils import get_openapi
 from fastapi.templating import Jinja2Templates
 from fastapi import Depends, Cookie
+from fastapi import Response
 from typing import Optional
 import secrets
 from typing import Optional, Dict, Any, List
@@ -55,6 +56,7 @@ from urllib.parse import urlparse
 # --- Authentication Configuration ---
 GATEWAY_ADMIN_PASSWORD = os.getenv("GATEWAY_ADMIN_PASSWORD", "admin")
 SESSION_COOKIE_NAME = "gateway_session_token"
+CLIENT_SESSION_COOKIE = "client_session_token"
 
 # --- Security Dependency ---
 # This function will run before every protected route.
@@ -69,6 +71,54 @@ async def verify_session(
             detail="Not authenticated", 
             headers={"Location": "/login"}
         )
+
+
+async def verify_client_session(
+    client_token: Optional[str] = Cookie(None, alias=CLIENT_SESSION_COOKIE)
+):
+    """Dependency for client-facing pages: ensures a valid client token cookie is present."""
+    if not client_token:
+        raise HTTPException(status_code=307, headers={"Location": "/client/login"})
+    # lightweight check: ensure token exists in DB
+    db = SessionLocal()
+    try:
+        c = db.query(Client).filter(Client.token == client_token).first()
+        if not c:
+            raise HTTPException(status_code=307, headers={"Location": "/client/login"})
+    finally:
+        db.close()
+
+
+async def get_admin_or_client(
+    session_token: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
+    client_token: Optional[str] = Cookie(None, alias=CLIENT_SESSION_COOKIE)
+):
+    """Dependency that returns {'role': 'admin'} for admin sessions or
+    {'role':'client', 'client': <Client>} for valid client sessions. Raises a
+    redirect HTTPException if neither session is valid.
+    """
+    db = SessionLocal()
+    try:
+        # Debug: log cookie values for troubleshooting client login flows
+        try:
+            print(f"get_admin_or_client: session_token={session_token!r}, client_token={client_token!r}")
+        except Exception:
+            pass
+        # Admin has precedence if both cookies present
+        if session_token == GATEWAY_ADMIN_PASSWORD:
+            return {"role": "admin"}
+
+        if client_token:
+            c = db.query(Client).filter(Client.token == client_token).first()
+            if c:
+                return {"role": "client", "client": c}
+            # invalid client token - redirect to client login
+            raise HTTPException(status_code=307, headers={"Location": "/client/login"})
+
+        # no valid session found - redirect to admin login by default
+        raise HTTPException(status_code=307, headers={"Location": "/login"})
+    finally:
+        db.close()
 
 
 # -------------------------
@@ -107,6 +157,111 @@ app = FastAPI(
     version="2.0.0"
 )
 
+# --- Custom OpenAPI for user/client ---
+from fastapi import Response
+from fastapi.responses import JSONResponse
+from fastapi import Request
+
+@app.get("/openapi-user.json", include_in_schema=False)
+async def openapi_for_user(request: Request, session_token: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME), client_token: Optional[str] = Cookie(None, alias=CLIENT_SESSION_COOKIE)):
+    db = SessionLocal()
+    client = None
+    try:
+        # Determine user role
+        if session_token == GATEWAY_ADMIN_PASSWORD:
+            endpoints = db.query(Endpoint).filter(Endpoint.is_active == True).all()
+        elif client_token:
+            client = db.query(Client).filter(Client.token == client_token).first()
+            if not client:
+                db.close()
+                return JSONResponse({"error": "Invalid client token"}, status_code=401)
+            links = db.query(EndpointClientLink).filter(EndpointClientLink.client_id == client.id).all()
+            endpoint_ids = [l.endpoint_id for l in links]
+            endpoints = db.query(Endpoint).filter(Endpoint.id.in_(endpoint_ids), Endpoint.is_active == True).all() if endpoint_ids else []
+        else:
+            db.close()
+            return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+        openapi_schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            description=app.description,
+            routes=app.routes,
+        )
+        # Always set OpenAPI version field and remove any Swagger field
+        openapi_schema["openapi"] = "3.0.0"
+        if "swagger" in openapi_schema:
+            del openapi_schema["swagger"]
+
+        # Remove all /api/* paths, then add only the allowed endpoints using the same logic as custom_openapi
+        openapi_schema["paths"] = {k: v for k, v in openapi_schema["paths"].items() if not k.startswith("/api/")}
+        for endpoint in endpoints:
+            if not endpoint.required_params:
+                continue
+            example_fields = {param: (str, Field(..., example=f"your_{param}_here")) for param in endpoint.required_params}
+            DynamicExampleModel = create_model(f"ExampleFor_{endpoint.path}", **example_fields)
+            # If we have a client session, include their token as default/example for the header param
+            token_default = client.token if client is not None else None
+
+            path_item = {
+                "post": {
+                    "summary": f"Configured Endpoint: {endpoint.description or endpoint.path}",
+                    "description": f"Handles notifications for `{endpoint.path}`. See schema for required parameters.",
+                    "tags": ["Endpoints"],
+                    "parameters": [
+                        {
+                            "name": "X-API-Token",
+                            "in": "header",
+                            "required": True,
+                            "description": "The secret API token for the client.",
+                            "schema": { "type": "string", **({"example": token_default} if token_default else {}) }
+                        }
+                    ],
+                    "requestBody": {
+                        "content": {
+                            "application/json": { "schema": DynamicExampleModel.model_json_schema() }
+                        },
+                        "required": True
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Successful Response",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "status": {"type": "string", "example": "queued"},
+                                            "task_id": {"type": "integer", "example": 123}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            openapi_schema["paths"][f"/api/{endpoint.path}"] = path_item
+
+        # If no allowed endpoints, add a dummy operation
+        if not any(k.startswith("/api/") for k in openapi_schema["paths"]):
+            openapi_schema["paths"]["/api/noop"] = {
+                "get": {
+                    "summary": "No endpoints available",
+                    "description": "This is a placeholder operation because you have no allowed endpoints.",
+                    "responses": {
+                        "200": {
+                            "description": "No endpoints available"
+                        }
+                    }
+                }
+            }
+        db.close()
+        return JSONResponse(openapi_schema)
+    except Exception as e:
+        db.close()
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
@@ -135,13 +290,11 @@ def custom_openapi():
     finally:
         try: db.close()
         except Exception: pass
-
     for endpoint in endpoints:
         if not endpoint.required_params: continue
 
         example_fields = {param: (str, Field(..., example=f"your_{param}_here")) for param in endpoint.required_params}
         DynamicExampleModel = create_model(f"ExampleFor_{endpoint.path}", **example_fields)
-
         path_item = {
             "post": {
                 "summary": f"Configured Endpoint: {endpoint.description or endpoint.path}",
@@ -299,7 +452,9 @@ def ensure_clients_endpoint_nullable(engine):
     """
     conn = engine.connect()
     try:
-        res = conn.execute("PRAGMA table_info('clients')").fetchall()
+        from sqlalchemy import text as _text
+        # Some SQLAlchemy connection objects require a text() wrapper for PRAGMA calls
+        res = conn.execute(_text("PRAGMA table_info('clients')")).fetchall()
         # PRAGMA columns: cid, name, type, notnull, dflt_value, pk
         endpoint_col = None
         for r in res:
@@ -461,7 +616,7 @@ def build_target_payload(db: Session, endpoint_id: int, resource_id: int, source
     except Exception:
         client = None
 
-    if client.is_dev_client and client.dev_rules_enabled:
+    if client.dev_rules_enabled:
         try:
             client_rules = db.query(ClientDevRule).filter(ClientDevRule.client_id == client.id, ClientDevRule.active == True).all()
             client_overrides = _eval_rules_and_collect(client_rules)
@@ -640,7 +795,7 @@ def add_log(db, task_id: int, message: str):
     log_entry = Log(task_id=task_id, message=message)
     db.add(log_entry)
     
-def perform_health_check(resource: Resource) -> (bool, int, str):
+def perform_health_check(resource: Resource) -> tuple[bool, int, str]:
     """
     Performs a health check request and returns the results.
     This function DOES NOT modify the database.
@@ -709,7 +864,7 @@ def perform_health_check(resource: Resource) -> (bool, int, str):
     except Exception as e:
         return False, None, str(e)
 
-def execute_task_attempt(resource: Resource, payload: Dict) -> (bool, int, str):
+def execute_task_attempt(resource: Resource, payload: Dict) -> tuple[bool, int, str]:
     """
     Performs a single task execution request and returns the results.
     This function DOES NOT modify the database.
@@ -803,7 +958,7 @@ async def task_cleanup_loop():
             db.close()
 
 
-def run_task_in_thread(task_id: int,healthy_resources) -> (bool, int, str):
+def run_task_in_thread(task_id: int,healthy_resources) -> tuple[bool, int, str]:
     """
     This function is designed to be run in a separate thread.
     It creates its own database session to be thread-safe.
@@ -1035,44 +1190,6 @@ async def resource_health_check_loop():
 # -------------------------
 # UI Routes
 # -------------------------
-@app.get("/", response_class=HTMLResponse, include_in_schema=False,dependencies=[Depends(verify_session)])
-def dashboard(request: Request):
-    db = SessionLocal()
-    
-    # 1. Fetch only resources that are marked as active
-    active_resources = db.query(Resource).filter(Resource.is_active == True).order_by(Resource.name).all()
-    
-    # 2. Fetch all active endpoints and determine their status
-    active_endpoints_query = db.query(Endpoint).filter(Endpoint.is_active == True).order_by(Endpoint.path).all()
-    active_endpoints_data = []
-    for e in active_endpoints_query:
-        active_endpoints_data.append({
-            "path": e.path,
-            "status": get_endpoint_status(db, e),
-            # indicate development mode so templates can render a badge
-            # The badge should reflect whether Development Mode is active only.
-            "is_dev": bool(getattr(e, 'is_development_mode', False))
-        })
-
-    # Fetch recent tasks and stats (this logic is unchanged)
-    tasks = db.query(Task).order_by(Task.created_at.desc()).limit(10).all()
-    stats = {
-        "total": db.query(Task).count(),
-        "pending": db.query(Task).filter(Task.status == "pending").count(),
-        "success": db.query(Task).filter(Task.status == "success").count(),
-        "failed": db.query(Task).filter(Task.status == "failed").count()
-    }
-    
-    context = {
-        "request": request,
-        "resources": active_resources,
-        "endpoints": active_endpoints_data, # Pass the new endpoint data
-        "tasks": tasks,
-        "stats": stats
-    }
-    db.close()
-    
-    return templates.TemplateResponse("dashboard.html", context)
 
 # --- Login and Logout Routes ---
 @app.get("/login", response_class=HTMLResponse, include_in_schema=False)
@@ -1088,17 +1205,36 @@ async def login_submit(request: Request, password: str = Form(...)):
             key=SESSION_COOKIE_NAME, 
             value=GATEWAY_ADMIN_PASSWORD, 
             httponly=True,
-            path="/" 
+            path="/",
+            samesite='lax'
         )
         return response
     else:
         context = {"request": request, "error": "Invalid password. Please try again."}
         return templates.TemplateResponse("login.html", context, status_code=401)
         
-@app.post("/logout", include_in_schema=False, dependencies=[Depends(verify_session)])
-def logout():
+@app.post("/logout", include_in_schema=False)
+def logout(dep=Depends(get_admin_or_client)):
+    """Logout endpoint that works for both admin and client sessions.
+
+    - If the request is from an admin session, remove the admin session cookie.
+    - If the request is from a client session, remove the client session cookie.
+    In both cases, redirect to /login.
+    """
     response = RedirectResponse(url="/login", status_code=303)
-    response.delete_cookie(key=SESSION_COOKIE_NAME)
+    try:
+        if isinstance(dep, dict) and dep.get('role') == 'admin':
+            response.delete_cookie(key=SESSION_COOKIE_NAME, path='/')
+        elif isinstance(dep, dict) and dep.get('role') == 'client':
+            response.delete_cookie(key=CLIENT_SESSION_COOKIE, path='/')
+        else:
+            # Fallback: clear both cookies to be safe
+            response.delete_cookie(key=SESSION_COOKIE_NAME, path='/')
+            response.delete_cookie(key=CLIENT_SESSION_COOKIE, path='/')
+    except Exception:
+        # Best-effort cookie deletion; continue to redirect regardless
+        response.delete_cookie(key=SESSION_COOKIE_NAME, path='/')
+        response.delete_cookie(key=CLIENT_SESSION_COOKIE, path='/')
     return response
 
 @app.post("/endpoints/add", include_in_schema=False, dependencies=[Depends(verify_session)])
@@ -1221,8 +1357,45 @@ def clients_list(request: Request):
     return templates.TemplateResponse("clients_list.html", context)
 
 
-@app.post('/clients/save', include_in_schema=False, dependencies=[Depends(verify_session)])
-async def client_save(request: Request):
+@app.get("/endpoints", response_class=HTMLResponse, include_in_schema=False, dependencies=[Depends(verify_session)])
+def endpoints_list(request: Request):
+    """Render the endpoints list page (admin only)."""
+    db = SessionLocal()
+    try:
+        eps = db.query(Endpoint).order_by(Endpoint.path).all()
+        endpoints = []
+        for e in eps:
+            # resource info: comma-separated names of associated resources
+            links = db.query(EndpointResourceLink).filter(EndpointResourceLink.endpoint_id == e.id).order_by(EndpointResourceLink.sequence).all()
+            res_names = []
+            for l in links:
+                r = db.query(Resource).get(l.resource_id)
+                if r:
+                    res_names.append(r.name)
+            resource_info = ', '.join(res_names) if res_names else '—'
+            status = get_endpoint_status(db, e)
+            endpoints.append({
+                'id': e.id,
+                'path': e.path,
+                'resource_info': resource_info,
+                'status': status,
+                'is_development_mode': bool(getattr(e, 'is_development_mode', False)),
+                'is_active': bool(getattr(e, 'is_active', False))
+            })
+
+        resource_count = db.query(Resource).count()
+        context = {
+            'request': request,
+            'endpoints': endpoints,
+            'resource_count': resource_count
+        }
+        return templates.TemplateResponse('endpoints.html', context)
+    finally:
+        db.close()
+
+
+@app.post('/clients/save', include_in_schema=False)
+async def client_save(request: Request, dep=Depends(get_admin_or_client)):
     form_data = await request.form()
     db = SessionLocal()
     try:
@@ -1236,9 +1409,6 @@ async def client_save(request: Request):
         name = form_data.get('name')
         desc = form_data.get('description')
         token = form_data.get('token') or generate_token()
-        # client-level dev flag
-        is_dev_client = True if form_data.get('is_dev_client') in ('1', 'on', 'true', True) else False
-        # dev options from the form
         dev_hold_tasks = True if form_data.get('dev_hold_tasks') in ('1', 'on', 'true', True) else False
         dev_rules_enabled = True if form_data.get('dev_rules_enabled') in ('1', 'on', 'true', True) else False
         endpoint_ids = form_data.getlist('endpoint_ids') if hasattr(form_data, 'getlist') else []
@@ -1253,9 +1423,13 @@ async def client_save(request: Request):
             except Exception:
                 parsed_rules = []
 
-        # Validation: if user requested Development Mode for the client, ensure at least
+        # If this request is from a client session, restrict behavior:
+        # - clients may only edit their own record (must supply id)
+        # - clients may only update development-related settings and description
+        #   (name, token and endpoint associations remain admin-only / readonly)
+        # Validation: if dev options are requested (dev_hold_tasks or dev_rules_enabled), ensure at least
         # one of: dev_hold_tasks, dev_rules_enabled, or at least one dev rule exists
-        if is_dev_client:
+        if (form_data.get('dev_rules_enabled') in ('1', 'on', 'true', True)) or (form_data.get('dev_hold_tasks') in ('1', 'on', 'true', True)):
             has_rules = bool(parsed_rules)
             # If editing an existing client and no rules were submitted, check existing DB rules
             if cid and not has_rules:
@@ -1320,16 +1494,16 @@ async def client_save(request: Request):
             client = db.query(Client).get(int(cid))
             if not client:
                 raise HTTPException(404)
-            client.name = name
-            client.description = desc
-            client.token = token
-            client.is_dev_client = is_dev_client
+            if dep.get('role') != 'client':
+                client.name = name
+                client.description = desc
+                client.token = token
             client.dev_hold_tasks = dev_hold_tasks
             client.dev_rules_enabled = dev_rules_enabled
             db.commit()
             client_id = client.id
         else:
-            new_client = Client(name=name.strip(), token=token, endpoint_id=None, description=desc, is_dev_client=is_dev_client, dev_hold_tasks=dev_hold_tasks, dev_rules_enabled=dev_rules_enabled)
+            new_client = Client(name=name.strip(), token=token, endpoint_id=None, description=desc, dev_hold_tasks=dev_hold_tasks, dev_rules_enabled=dev_rules_enabled)
             db.add(new_client)
             db.commit()
             db.refresh(new_client)
@@ -1386,12 +1560,10 @@ async def client_save(request: Request):
     # If the form included a return_to field (used when creating from an endpoint), honor it
     try:
         form_return = form_data.get('return_to') if 'form_data' in locals() else None
-        if form_return:
-            return RedirectResponse(form_return, status_code=303)
     except Exception:
-        pass
+        form_return = None
 
-    return RedirectResponse('/clients', status_code=303)
+    return RedirectResponse('/' if dep.get('role') == 'client' else form_return or '/clients', status_code=303)
 
 
 @app.get('/clients/new', response_class=HTMLResponse, include_in_schema=False, dependencies=[Depends(verify_session)])
@@ -1433,10 +1605,15 @@ def client_new_form(request: Request):
         db.close()
 
 
-@app.get('/clients/edit/{cid}', response_class=HTMLResponse, include_in_schema=False, dependencies=[Depends(verify_session)])
-def client_edit_form(request: Request, cid: int):
+@app.get('/clients/edit/{cid}', response_class=HTMLResponse, include_in_schema=False)
+def client_edit_form(request: Request, cid: int, dep=Depends(get_admin_or_client)):
     db = SessionLocal()
     try:
+        # If caller is a client session, ensure they can only view/edit their own record
+        if isinstance(dep, dict) and dep.get('role') == 'client':
+            caller_client = dep.get('client')
+            if not caller_client or caller_client.id != cid:
+                raise HTTPException(status_code=403)
         client = db.query(Client).get(cid)
         if not client:
             raise HTTPException(404)
@@ -1466,12 +1643,19 @@ def client_edit_form(request: Request, cid: int):
         context = {
             'request': request,
             'client': client,
+            'is_client': True if isinstance(dep, dict) and dep.get('role') == 'client' else False,
             'generated_token': client.token,
             'all_endpoints': [{'id': e.id, 'path': e.path} for e in all_endpoints],
             'linked_endpoint_ids': linked_ids,
             'available_rule_keys': sorted(list(available_rule_keys)),
-            'client_dev_rules': client_rules_json
+            'client_dev_rules': client_rules_json,
+            'dev_rules_enabled': client.dev_rules_enabled,
+            'dev_hold_tasks': client.dev_hold_tasks
         }
+        # If the caller is a client session, render the client-facing settings template
+        # if isinstance(dep, dict) and dep.get('role') == 'client':
+        #     return templates.TemplateResponse('client_setting.html', context)
+        # Admin users receive the full client form
         return templates.TemplateResponse('client_form.html', context)
     finally:
         db.close()
@@ -1811,40 +1995,142 @@ def toggle_active(eid: int):
     db.close()
     return RedirectResponse("/endpoints", status_code=303)
 
-@app.get("/documentation", response_class=HTMLResponse, include_in_schema=False, dependencies=[Depends(verify_session)])
-def documentation_page():
-    return render("documentation.html")
+@app.get("/documentation", response_class=HTMLResponse, include_in_schema=False)
+def documentation_page(dep=Depends(get_admin_or_client), request: Request = None):
+    db = SessionLocal()
+    try:
+        # If client, render the standard documentation.html but instruct the
+        # embedded Swagger UI to load a client-scoped OpenAPI JSON.
+        doc_url = "/docs"
+        is_client = dep.get('client') is not None
+        context = {"client":dep.get('client'), "request": request, "doc_url": doc_url, "is_client": is_client}
+        return templates.TemplateResponse("documentation.html", context)
+
+    finally:
+        db.close()
+
+# -------------------------
+# Client web session routes
+# -------------------------
+@app.get('/client/login', include_in_schema=False)
+def client_login_form(request: Request):
+    # Legacy client login URL now redirects to the unified login page.
+    return RedirectResponse(url='/login', status_code=303)
+
+
+@app.post('/client/login', include_in_schema=False)
+async def client_login_submit(request: Request, token: str = Form(...)):
+    db = SessionLocal()
+    try:
+        client = db.query(Client).filter(Client.token == token).first()
+        if not client:
+            # Render the unified login page, selecting the Client tab and showing
+            # an inline error message so the user stays on the same form.
+            return templates.TemplateResponse('login.html', {"request": request, "client_error": "Invalid token"}, status_code=401)
+        # Set a cookie for client session and redirect to the unified dashboard '/'
+        resp = RedirectResponse(url='/', status_code=303)
+        resp.set_cookie(key=CLIENT_SESSION_COOKIE, value=client.token, httponly=True, path='/', samesite='lax')
+        try:
+            print(f"client_login_submit: set cookie {CLIENT_SESSION_COOKIE}={client.token!r}")
+        except Exception:
+            pass
+        return resp
+    finally:
+        db.close()
+
+
+@app.post('/client/logout', include_in_schema=False)
+def client_logout():
+    resp = RedirectResponse(url='/client/login', status_code=303)
+    resp.delete_cookie(key=CLIENT_SESSION_COOKIE)
+    return resp
+
+
+@app.get('/client/dashboard', include_in_schema=False)
+def client_dashboard_redirect(dep=Depends(verify_client_session)):
+    """Compatibility route: redirect legacy /client/dashboard to the unified dashboard '/'.
+    The client session is still validated by the dependency; after that the client
+    should be able to access the root dashboard which accepts client sessions.
+    """
+    return RedirectResponse(url='/', status_code=303)
+
+
+@app.get('/client/tasks', response_class=HTMLResponse, include_in_schema=False, dependencies=[Depends(verify_client_session)])
+def client_tasks(request: Request, endpoint_id: Optional[int] = None, client_token: Optional[str] = Cookie(None, alias=CLIENT_SESSION_COOKIE)):
+    db = SessionLocal()
+    try:
+        client = db.query(Client).filter(Client.token == client_token).first()
+        query = db.query(Task).filter(Task.client_id == client.id)
+        if endpoint_id:
+            query = query.filter(Task.endpoint_id == endpoint_id)
+        tasks = query.order_by(Task.created_at.desc()).all()
+        endpoints = [e for e in db.query(Endpoint).all()]
+        return templates.TemplateResponse('client_tasks.html', {"request": request, "tasks": tasks, "endpoints": endpoints, "client": client})
+    finally:
+        db.close()
+
+
+@app.post('/client/task/{tid}/retry', include_in_schema=False, dependencies=[Depends(verify_client_session)])
+def client_task_retry(tid: int, client_token: Optional[str] = Cookie(None, alias=CLIENT_SESSION_COOKIE)):
+    db = SessionLocal()
+    try:
+        client = db.query(Client).filter(Client.token == client_token).first()
+        t = db.query(Task).get(tid)
+        if not t or t.client_id != client.id:
+            return RedirectResponse('/client/tasks', status_code=303)
+        # reset task to pending and decrease retry_count
+        t.status = 'pending'
+        t.retry_count = 0
+        db.commit()
+        return RedirectResponse(f'/client/task/{tid}', status_code=303)
+    finally:
+        db.close()
+
 
 # Add this new function with your other UI routes
-@app.get("/tasks", response_class=HTMLResponse,include_in_schema=False, dependencies=[Depends(verify_session)])
-def tasks_list(status: Optional[str] = None, search: Optional[str] = None):
+@app.get("/tasks", response_class=HTMLResponse, include_in_schema=False)
+def tasks_list(request: Request, dep=Depends(get_admin_or_client), status: Optional[str] = None, search: Optional[str] = None):
     db = SessionLocal()
-    query = db.query(Task)
+    try:
+        query = db.query(Task)
 
-    if status and status in ["pending", "success", "failed", "processing"]:
-        query = query.filter(Task.status == status)
-    
-    if search:
-        # Search within the source_payload JSON object
-        search_term = f"%{search}%"
-        query = query.filter(
-            or_(
-                cast(Task.source_payload, String).ilike(search_term),
-                Task.ref_id.ilike(search_term),
-                Task.scope.ilike(search_term)
+        # If client, restrict tasks to their own
+        if dep.get('role') == 'client':
+            client = dep.get('client')
+            query = query.filter(Task.client_id == client.id)
+
+        if status and status in ["pending", "success", "failed", "processing"]:
+            query = query.filter(Task.status == status)
+        
+        if search:
+            # Search within the source_payload JSON object
+            search_term = f"%{search}%"
+            query = query.filter(
+                or_(
+                    cast(Task.source_payload, String).ilike(search_term),
+                    # Also search transformed/target payload, resource, client and endpoint path
+                    cast(Task.target_payload, String).ilike(search_term),
+                    Task.resource_name.ilike(search_term),
+                    Task.client_name.ilike(search_term),
+                    Task.endpoint_path.ilike(search_term),
+                    Task.ref_id.ilike(search_term),
+                    Task.scope.ilike(search_term)
+                )
             )
-        )
-    tasks = query.order_by(Task.created_at.desc()).all()
-    db.close()
-    
-    return render("tasks.html", 
-                  tasks=tasks, 
-                  current_status=status, 
-                  current_search=search)
+        tasks = query.order_by(Task.created_at.desc()).all()
+        # If the caller is a client, propagate `is_client` to the template so
+        # the base navigation can hide admin-only links consistently.
+        is_client = True if isinstance(dep, dict) and dep.get('role') == 'client' else False
+        client = dep.get('client') if is_client else None
+        context = {"request": request, "tasks": tasks, "current_status": status, "current_search": search, "is_client": is_client, "client": client}
+        # Use TemplateResponse to ensure `is_client` is available to base.html
+        return templates.TemplateResponse("tasks.html", context)
+    finally:
+        db.close()
 
 
 # Batch delete tasks (top-level route)
-@app.post("/tasks/batch_delete", include_in_schema=False, dependencies=[Depends(verify_session)])
+@app.post("/tasks/batch_delete", include_in_schema=False, dependencies=[Depends(get_admin_or_client)])
 async def tasks_batch_delete(request: Request):
     form = await request.form()
     # form.getlist is available on Starlette's FormData
@@ -1864,8 +2150,6 @@ async def tasks_batch_delete(request: Request):
     finally:
         db.close()
     return RedirectResponse("/tasks", status_code=303)
-
-
     
 # --- Resources ---
 @app.get("/resources", response_class=HTMLResponse,include_in_schema=False, dependencies=[Depends(verify_session)])
@@ -1979,7 +2263,6 @@ def resources_delete(rid: int):
     db = SessionLocal(); r = db.query(Resource).get(rid)
     if r: db.delete(r); db.commit()
     db.close(); return RedirectResponse("/resources", status_code=303)
-
 
 @app.post("/resources/duplicate/{rid}", include_in_schema=False, dependencies=[Depends(verify_session)])
 def resources_duplicate(rid: int):
@@ -2178,8 +2461,8 @@ def get_resource_details(resource_id: int):
         raise HTTPException(status_code=404, detail="Resource not found")
     return {"id": resource.id, "name": resource.name, "required_params": resource.required_params or []}
 
-@app.get("/resources/{rid}/history", response_class=HTMLResponse, include_in_schema=False, dependencies=[Depends(verify_session)])
-def resource_history(rid: int):
+@app.get("/resources/{rid}/history", response_class=HTMLResponse, include_in_schema=False, dependencies=[Depends(get_admin_or_client)])
+def resource_history(rid: int, dep=Depends(get_admin_or_client)):
     db = SessionLocal()
     resource = db.query(Resource).get(rid)
     if not resource: 
@@ -2187,9 +2470,12 @@ def resource_history(rid: int):
     
     # Fetches the last 5 logs in descending order
     logs = db.query(HealthCheckLog).filter(HealthCheckLog.resource_id == rid).order_by(HealthCheckLog.created_at.desc()).limit(5).all()
-    
+    is_client = dep.get('role') == 'client'
+    client_obj = None
+    if isinstance(dep, dict) and is_client:
+        client_obj = dep.get('client')
     db.close()
-    return render("health_history.html", resource=resource, logs=logs)
+    return render("health_history.html", resource=resource,client=client_obj, is_client=is_client, logs=logs)
 
 @app.post("/resources/{rid}/check", include_in_schema=False, dependencies=[Depends(verify_session)])
 def manual_health_check(rid: int):
@@ -2356,38 +2642,82 @@ def manual_health_check(rid: int):
 
 
 # --- Endpoints ---
-@app.get("/endpoints", response_class=HTMLResponse, include_in_schema=False, dependencies=[Depends(verify_session)])
-def endpoints_view(request: Request):
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def dashboard(request: Request, dep=Depends(get_admin_or_client)):
     db = SessionLocal()
-    endpoints = db.query(Endpoint).order_by(Endpoint.created_at).all()
-    
-    # Get a count of all existing resources to control the button state
-    resource_count = db.query(Resource).count()
-    
-    endpoints_ui = []
-    for e in endpoints:
-        resource_link_count = db.query(EndpointResourceLink).filter(EndpointResourceLink.endpoint_id == e.id).count()
-        endpoints_ui.append({
-            "id": e.id, 
-            "path": e.path, 
-            "resource_info": f"{resource_link_count} resource(s)" if resource_link_count > 0 else "None",
-            "status": get_endpoint_status(db, e),
-            "is_development_mode": e.is_development_mode,
-            "is_active": e.is_active
-        })
-    
-    context = {
-        "request": request,
-        "endpoints": endpoints_ui,
-        "resource_count": resource_count # Pass the count to the template
-    }
-    db.close()
-    return templates.TemplateResponse("endpoints.html", context)
+    try:
+        # Admin view: full data
+        if dep.get('role') == 'admin':
+            # 1. Fetch only resources that are marked as active
+            active_resources = db.query(Resource).filter(Resource.is_active == True).order_by(Resource.name).all()
 
-@app.post("/endpoints/add",include_in_schema=False, dependencies=[Depends(verify_session)])
-def endpoints_add(path: str = Form(...), resource_id: Optional[int] = Form(None), desc: Optional[str] = Form(None), required_params: Optional[str] = Form(None)):
-    path = path.strip().lstrip("/").replace(" ", "_")
-    parsed_params = json.loads(required_params) if required_params else None
+            # 2. Fetch all active endpoints and determine their status
+            active_endpoints_query = db.query(Endpoint).filter(Endpoint.is_active == True).order_by(Endpoint.path).all()
+            active_endpoints_data = []
+            for e in active_endpoints_query:
+                active_endpoints_data.append({
+                    "path": e.path,
+                    "status": get_endpoint_status(db, e),
+                    # indicate development mode so templates can render a badge
+                    "is_dev": bool(getattr(e, 'is_development_mode', False))
+                })
+
+            # Fetch recent tasks and stats (this logic is unchanged)
+            tasks = db.query(Task).order_by(Task.created_at.desc()).limit(10).all()
+            stats = {
+                "total": db.query(Task).count(),
+                "pending": db.query(Task).filter(Task.status == "pending").count(),
+                "success": db.query(Task).filter(Task.status == "success").count(),
+                "failed": db.query(Task).filter(Task.status == "failed").count()
+            }
+
+            context = {
+                "request": request,
+                "resources": active_resources,
+                "endpoints": active_endpoints_data,
+                "tasks": tasks,
+                "stats": stats
+            }
+            return templates.TemplateResponse("dashboard.html", context)
+
+        # Client view: scoped to client-associated endpoints/resources/tasks
+        client = dep.get('client')
+        if not client:
+            # fallback redirect to client login
+            raise HTTPException(status_code=307, headers={"Location": "/client/login"})
+
+        # find associated endpoints via EndpointClientLink
+        links = db.query(EndpointClientLink).filter(EndpointClientLink.client_id == client.id).all()
+        endpoint_ids = [l.endpoint_id for l in links]
+        endpoints_q = db.query(Endpoint).filter(Endpoint.id.in_(endpoint_ids)).all() if endpoint_ids else []
+
+        # Build endpoints UI data similar to admin homepage (path, status, is_dev)
+        endpoints_ui = []
+        for e in endpoints_q:
+            endpoints_ui.append({
+                "path": e.path,
+                "status": get_endpoint_status(db, e),
+                "is_dev": bool(getattr(e, 'is_development_mode', False))
+            })
+
+        # Resources: only those linked to the client's endpoints
+        resource_links = db.query(EndpointResourceLink).filter(EndpointResourceLink.endpoint_id.in_(endpoint_ids)).all() if endpoint_ids else []
+        resource_ids = list(dict.fromkeys([rl.resource_id for rl in resource_links])) if resource_links else []
+        resources = db.query(Resource).filter(Resource.id.in_(resource_ids), Resource.is_active == True).order_by(Resource.name).all() if resource_ids else []
+
+        # tasks stats and recent tasks for this client
+        tasks = db.query(Task).filter(Task.client_id == client.id).order_by(Task.created_at.desc()).limit(10).all()
+        stats = {
+            "total": db.query(Task).filter(Task.client_id == client.id).count(),
+            "pending": db.query(Task).filter(Task.client_id == client.id, Task.status == "pending").count(),
+            "success": db.query(Task).filter(Task.client_id == client.id, Task.status == "success").count(),
+            "failed": db.query(Task).filter(Task.client_id == client.id, Task.status == "failed").count()
+        }
+
+        context = {"request": request, "client": client, "resources": resources, "endpoints": endpoints_ui, "tasks": tasks, "stats": stats, "is_client": True}
+        return templates.TemplateResponse("dashboard.html", context)
+    finally:
+        db.close()
     db = SessionLocal()
     e = Endpoint(path=path, resource_id=int(resource_id) if resource_id else None, description=desc, required_params=parsed_params)
     db.add(e); db.commit(); db.close()
@@ -2633,19 +2963,36 @@ def rules_view(endpoint_id: int):
     return RedirectResponse("/endpoints", status_code=303)
 
 # --- Tasks ---
-@app.get("/task/{tid}", response_class=HTMLResponse, include_in_schema=False, dependencies=[Depends(verify_session)])
-def task_detail(tid: int):
+@app.get("/task/{tid}", response_class=HTMLResponse, include_in_schema=False)
+def task_detail(tid: int, dep=Depends(get_admin_or_client)):
     db = SessionLocal()
-    task = db.query(Task).get(tid)
-    if not task:
-        raise HTTPException(404)
-    logs = db.query(Log).filter(Log.task_id == tid).order_by(Log.created_at.asc()).all()
-    # NEW: Fetch the attempt logs
-    attempt_logs = db.query(TaskAttemptLog).filter(TaskAttemptLog.task_id == tid).order_by(TaskAttemptLog.attempt_at.asc()).all()
-    db.close()
-    return render("task_detail.html", task=task, logs=logs, attempt_logs=attempt_logs)
+    try:
+        task = db.query(Task).get(tid)
+        if not task:
+            raise HTTPException(404)
 
-@app.post("/task/{tid}/retry", include_in_schema=False, dependencies=[Depends(verify_session)])
+        # If client, ensure they own the task
+        if dep.get('role') == 'client':
+            client = dep.get('client')
+            if task.client_id != client.id:
+                # Redirect clients to client login (or tasks list)
+                raise HTTPException(status_code=307, headers={"Location": "/client/login"})
+
+        logs = db.query(Log).filter(Log.task_id == tid).order_by(Log.created_at.asc()).all()
+        # NEW: Fetch the attempt logs
+        is_client = dep.get('role') == 'client'
+        attempt_logs = db.query(TaskAttemptLog).filter(TaskAttemptLog.task_id == tid).order_by(TaskAttemptLog.attempt_at.asc()).all()
+        # Ensure 'client' is always present in context for base.html
+        client_obj = None
+        if isinstance(dep, dict) and dep.get('role') == 'client':
+            client_obj = dep.get('client')
+        context = dict(task=task, logs=logs, attempt_logs=attempt_logs, is_client=is_client, client=client_obj)
+        return render("task_detail.html", **context)
+    finally:
+        db.close()
+
+
+@app.post("/task/{tid}/retry", include_in_schema=False, dependencies=[Depends(get_admin_or_client)])
 def task_retry(tid: int):
     db = SessionLocal()
     try:
@@ -2669,6 +3016,50 @@ def task_retry(tid: int):
     finally:
         db.close()
 
+@app.post("/task/{tid}/stop", include_in_schema=False, dependencies=[Depends(get_admin_or_client)])
+def stop_task(tid: int, dep=Depends(get_admin_or_client)):
+    db = SessionLocal()
+    try:
+        task = db.query(Task).get(tid)
+        if not task:
+            db.close()
+            return JSONResponse({"detail": "Task not found."}, status_code=404)
+        # Only allow stop if pending
+        if task.status != "pending":
+            db.close()
+            return JSONResponse({"detail": "Only pending tasks can be stopped."}, status_code=400)
+        task.status = "stopped"
+        task.last_error = "Stopped by user."
+        db.commit()
+        db.close()
+        return JSONResponse({"success": True, "message": "Task stopped."})
+    except Exception as e:
+        db.close()
+        return JSONResponse({"detail": str(e)}, status_code=500)
+
+@app.post("/task/{tid}/delete", include_in_schema=False, dependencies=[Depends(get_admin_or_client)])
+def delete_task(tid: int, dep=Depends(get_admin_or_client)):
+    db = SessionLocal()
+    try:
+        task = db.query(Task).get(tid)
+        if not task:
+            db.close()
+            return JSONResponse({"detail": "Task not found."}, status_code=404)
+        # Only allow delete if failed or success
+        if task.status in ["processing"]:
+            db.close()
+            return JSONResponse({"detail": "Processing tasks can not be deleted."}, status_code=400)
+        # Delete related logs
+        db.query(TaskLog).filter(TaskLog.task_id == tid).delete()
+        db.query(TaskAttemptLog).filter(TaskAttemptLog.task_id == tid).delete()
+        db.delete(task)
+        db.commit()
+        db.close()
+        return JSONResponse({"success": True, "message": "Task deleted."})
+    except Exception as e:
+        db.close()
+        return JSONResponse({"detail": str(e)}, status_code=500)
+    
 # Setting
 @app.get("/settings", response_class=HTMLResponse, include_in_schema=False, dependencies=[Depends(verify_session)])
 def settings_form(request: Request):
@@ -2762,6 +3153,7 @@ def test_smtp_connection(
 async def api_dynamic(
     epath: str = Path(..., description="The `path` of the configured endpoint, e.g., 'send_alert'"), 
     payload: Dict[str, Any] = Body(...),
+    request: Request = None,
     x_api_token: Optional[str] = Header(None, description="The authentication token for the client.")
 ):
     epath = epath.strip().lstrip("/")
@@ -2771,15 +3163,42 @@ async def api_dynamic(
         if not endpoint or not endpoint.is_active:
             raise HTTPException(status_code=404, detail="Endpoint not found")
 
-        if not x_api_token:
+        # Support flexible header names for the API token. Priority:
+        # 1) Explicit x_api_token header (FastAPI Header parameter)
+        # 2) Other common header names: Token, Access-Token, Access_Token, token
+        # 3) Authorization: Bearer <token>
+        token = x_api_token
+        if not token and request is not None:
+            header_candidates = [
+                'token', 'access_token', 'access-token', 'access_token',
+                'x-api-token', 'x_api_token', 'authorization'
+            ]
+            for hn in header_candidates:
+                hv = request.headers.get(hn)
+                if not hv:
+                    # try case-insensitive fallback (headers are case-insensitive but ensure coverage)
+                    hv = request.headers.get(hn.lower()) or request.headers.get(hn.upper())
+                if hv:
+                    if hn == 'authorization':
+                        # support 'Bearer <token>' or plain token
+                        parts = hv.split()
+                        if len(parts) == 2 and parts[0].lower() == 'bearer':
+                            token = parts[1]
+                        else:
+                            token = hv
+                    else:
+                        token = hv
+                    break
+
+        if not token:
             raise HTTPException(status_code=401, detail="API token is missing")
 
         # Validate token against clients linked to this endpoint via the association table
         client = db.query(Client).join(EndpointClientLink, Client.id == EndpointClientLink.client_id)\
-            .filter(Client.token == x_api_token, EndpointClientLink.endpoint_id == endpoint.id).first()
+            .filter(Client.token == token, EndpointClientLink.endpoint_id == endpoint.id).first()
         if not client:
             # Fallback for legacy single-column clients.endpoint_id for older DBs
-            legacy_client = db.query(Client).filter(Client.token == x_api_token, Client.endpoint_id == endpoint.id).first()
+            legacy_client = db.query(Client).filter(Client.token == token, Client.endpoint_id == endpoint.id).first()
             if not legacy_client:
                 raise HTTPException(status_code=403, detail="Invalid API token for this endpoint")
             client = legacy_client
@@ -2811,7 +3230,7 @@ async def api_dynamic(
 
         # Only hold a task for a client when dev mode is explicitly enabled AND
         # the client has opted to 'hold' incoming tasks.
-        if (client.is_dev_client and client.dev_hold_tasks) or (endpoint.is_development_mode and endpoint.dev_hold_tasks):
+        if client.dev_hold_tasks or (endpoint.is_development_mode and endpoint.dev_hold_tasks):
             initial_status = 'dev'
 
         t = Task(

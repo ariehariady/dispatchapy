@@ -36,14 +36,27 @@
             <nav id="main-nav" class="flex items-center space-x-2 text-sm font-medium">
             <a href="/" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-gray-700 hover:text-white">Dashboard</a>
             <a href="/tasks" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-gray-700 hover:text-white">Tasks</a>
+            {% if is_client and client %}
+            <a href="/clients/edit/{{ client.id }}" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-gray-700 hover:text-white">Client Settings</a>
+            {% endif %}
+            {% if not is_client %}
             <a href="/resources" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-gray-700 hover:text-white">Resources</a>
             <a href="/endpoints" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-gray-700 hover:text-white">Endpoints</a>
             <a href="/clients" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-gray-700 hover:text-white">Clients</a>
             <a href="/settings" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-gray-700 hover:text-white">Settings</a>
+            {% endif %}
             <a href="/documentation" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-gray-700 hover:text-white">API Docs</a>
-            <form action="/logout" method="post" class="inline">
-                <button type="submit" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-red-500 hover:text-white">Logout</button>
+            {% if is_client %}
+            <form action="/client/logout" method="post" class="inline">
+                <button type="submit" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-red-500 hover:text-white">
+                    Logout <strong>({{ client.name }})</strong>
+                </button>
             </form>
+            {% else %}
+            <form action="/logout" method="post" class="inline">
+                <button type="submit" class="nav-link px-3 py-2 rounded-md text-gray-300 hover:bg-red-500 hover:text-white">Logout (Admin)</button>
+            </form>
+            {% endif %}
             </nav>
         </header>
         
@@ -96,6 +109,32 @@
                 if (isActive) {
                     link.classList.add('bg-blue-600', 'text-white');
                     link.classList.remove('text-gray-300', 'hover:bg-gray-700', 'hover:text-white');
+                }
+            });
+        });
+
+        document.querySelectorAll('.stop-task-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const tid = btn.getAttribute('data-tid');
+                if (!tid) return;
+                if (!confirm('Are you sure you want to stop this pending task?')) return;
+                btn.disabled = true;
+                btn.textContent = 'Stopping...';
+                try {
+                    const resp = await fetch(`/task/${tid}/stop`, { method: 'POST', credentials: 'same-origin', headers: { 'Accept': 'application/json' }});
+                    if (!resp.ok) {
+                        const txt = await resp.text();
+                        alert('Failed to stop task: ' + resp.status + ' ' + txt);
+                        btn.disabled = false;
+                        btn.textContent = 'Stop';
+                        return;
+                    }
+                    // After stopping, redirect to tasks list (task no longer pending)
+                    window.location.href = '/';
+                } catch (err) {
+                    alert('Failed to stop task: ' + err);
+                    btn.disabled = false;
+                    btn.textContent = 'Stop';
                 }
             });
         });
