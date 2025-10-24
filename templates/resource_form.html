@@ -1,0 +1,314 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="bg-white p-6 rounded-lg shadow-sm" x-data="{ 
+    isHealthCheckEnabled: {{ 'true' if (resource and resource.is_health_check_enabled) else 'false' }},
+    sendEmail: {{ 'true' if (resource and resource.send_failure_email) else 'false' }},
+    sendWebhook: {{ 'true' if (resource and resource.send_failure_webhook) else 'false' }}
+}">
+        <h2 class="text-lg font-semibold mb-4">{{ 'Edit Resource: ' + resource.name if resource else 'Create New Resource' }}</h2>
+        {% if error %}
+            <script>try { alert({{ error | tojson | safe }}); } catch(e) { console.error('alert error', e); }</script>
+        {% endif %}
+    <form class="grid grid-cols-1 gap-4" method="post" action="{{ edit_action if resource else '/resources/new' }}" id="resource-form">
+        <!-- Basic Info, Headers, and Required Params sections -->
+        <div class="grid grid-cols-1 gap-3">
+            <label class="text-sm font-medium">Name</label>
+            <input name="name" placeholder="e.g. Primary Twilio Account" class="p-2 border rounded" value="{{ resource.name if resource else '' }}" required />
+            <label class="text-sm font-medium">Endpoint URL</label>
+            <input name="endpoint" placeholder="https://api.provider.com/v1/messages" class="p-2 border rounded" value="{{ resource.endpoint if resource else '' }}" required />
+        </div>
+        <div class="border p-3 rounded">
+            <label class="text-sm font-medium">Headers</label>
+            <div id="headers-container" class="mt-2 space-y-2"></div>
+            <div class="flex items-center gap-2 mt-3 pt-3 border-t">
+                <input type="text" id="new-header-key" placeholder="Key" class="p-2 border rounded w-1/3">
+                <input type="text" id="new-header-value" placeholder="Value" class="p-2 border rounded flex-grow">
+                <button type="button" id="add-header-btn" class="px-3 py-2 bg-gray-600 text-white rounded w-20">Add</button>
+            </div>
+        </div>
+        <div class="border p-3 rounded">
+            <label class="text-sm font-medium">Required Payload Keys</label>
+            <p class="text-xs text-gray-500 mt-1 mb-2">Define the keys that must be present in the JSON payload.</p>
+            <div id="params-container" class="mt-2 space-y-2"></div>
+            <div class="flex items-center gap-2 mt-3 pt-3 border-t">
+                <input type="text" id="new-param-name" placeholder="Add parameter name..." class="p-2 border rounded flex-grow">
+                <button type="button" id="add-param-btn" class="px-3 py-2 bg-gray-600 text-white rounded w-20">Add</button>
+            </div>
+        </div>
+
+        <!-- Health Check Configuration -->
+        <div class="border p-3 rounded">
+                <div class="flex items-center">
+                <input type="checkbox" id="hc-toggle" name="is_health_check_enabled" value="true" x-model="isHealthCheckEnabled" class="h-4 w-4 rounded" {% if resource and resource.is_health_check_enabled %}checked{% endif %}>
+                <label for="hc-toggle" class="ml-2 block text-sm font-medium">Enable Health Check</label>
+            </div>
+            
+            <div x-show="isHealthCheckEnabled" class="mt-3 pt-3 border-t space-y-4">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-4">
+                        <label class="flex items-center"><input type="radio" name="health_check_method" value="simple" {% if not resource or resource.health_check_method == 'simple' %}checked{% endif %}> <span class="ml-2 text-sm">Simple (TCP ping — non-invasive)</span></label>
+                        <label class="flex items-center"><input type="radio" name="health_check_method" value="actual" {% if resource and resource.health_check_method == 'actual' %}checked{% endif %}> <span class="ml-2 text-sm">Actual (send configured payload)</span></label>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <label class="text-sm font-medium">Check every</label>
+                        <input type="number" name="interval_min" value="{{ resource.interval_min if resource else 1 }}" class="p-2 border rounded w-20">
+                        <span class="text-sm">to</span>
+                        <input type="number" name="interval_max" value="{{ resource.interval_max if resource else 2 }}" class="p-2 border rounded w-20">
+                        <select name="interval_unit" class="p-2 border rounded"><option value="seconds" {% if resource and resource.interval_unit == 'seconds' %}selected{% endif %}>Seconds</option><option value="minutes" {% if not resource or resource.interval_unit == 'minutes' %}selected{% endif %}>Minutes</option><option value="hours" {% if resource and resource.interval_unit == 'hours' %}selected{% endif %}>Hours</option></select>
+                    </div>
+
+                </div>
+                    <div id="health-test-values-section" style="display:none">
+                    <p id="hc-info-simple" class="text-xs text-gray-500 mt-1 mb-2" style="display:none">Simple health check performs a TCP connection (socket connect) to the resource host and port to verify network reachability. It is non-invasive — no HTTP requests or payloads are sent. Use this when you only need to confirm the endpoint is reachable at the TCP level.</p>
+                    <p id="hc-info-actual" class="text-xs text-gray-500 mt-1 mb-2" style="display:none">Provide a test value for each required parameter to perform an actual health check using the configured payload.</p>
+                    <p id="hc-placeholders" class="text-xs text-gray-500 mb-2">Available placeholders: <span class="font-mono">{datetime}</span> (current UTC timestamp), <span class="font-mono">{resource_name}</span>, <span class="font-mono">{resource_endpoint}</span>. You can also reference parameter values using <span class="font-mono">{param:KEY}</span> (e.g. <span class="font-mono">{param:phone}</span>).</p>
+                    <div id="test-values-container" class="mt-2 space-y-2"></div>
+                </div>
+                <div class="space-y-2 border-t pt-3">
+                    <label class="flex items-center"><input type="checkbox" name="send_failure_email" value="true" x-model="sendEmail" class="h-4 w-4 rounded"><span class="ml-2 text-sm font-medium">Send Failure Notification Email</span></label>
+                    <div x-show="sendEmail" class="pl-6 space-y-3">
+                        <div><label class="text-sm font-medium">Recipient Emails</label><input type="text" name="notification_email" placeholder="alerts@example.com, admin@example.com" class="p-2 border rounded w-full mt-1" value="{{ resource.notification_email if resource else '' }}" x-bind:disabled="!sendEmail"><p class="text-xs text-gray-500 mt-1">Comma-separated list.</p></div>
+                        <div><label class="text-sm font-medium">Subject</label><input type="text" name="notification_subject" value="{{ resource.notification_subject if resource else default_subject }}" class="p-2 border rounded w-full mt-1 font-mono text-xs" x-bind:disabled="!sendEmail"></div>
+                        <div><label class="text-sm font-medium">Body Template</label><p class="text-xs text-gray-500 mt-1">Placeholders: {resource_name}, {resource_endpoint}, {timestamp_utc}</p><textarea name="notification_template" class="p-2 border rounded w-full mt-1 font-mono text-xs" rows="6" x-bind:disabled="!sendEmail">{{ resource.notification_template if resource else default_template }}</textarea></div>
+                    </div>
+                </div>
+
+                <div class="space-y-2 border-t pt-3 mt-3">
+
+
+                    <label class="flex items-center"><input type="checkbox" name="send_failure_webhook" value="true" x-model="sendWebhook" class="h-4 w-4 rounded"><span class="ml-2 text-sm font-medium">Trigger Failure Webhook</span></label>
+                    <div x-show="sendWebhook" class="pl-6 space-y-3">
+                        <div><label class="text-sm font-medium">Webhook URL</label><input type="url" name="failure_webhook_url" placeholder="https://api.example.com/webhook" class="p-2 border rounded w-full mt-1" value="{{ resource.failure_webhook_url if resource else '' }}" x-bind:disabled="!sendWebhook"></div>
+                        <div><label class="text-sm font-medium">Headers (JSON)</label><textarea name="failure_webhook_headers" class="p-2 border rounded w-full mt-1 font-mono text-xs" rows="3" placeholder='{ "Content-Type": "application/json" }' x-bind:disabled="!sendWebhook">{% if resource and resource.failure_webhook_headers %}{{ resource.failure_webhook_headers | tojson(indent=2) }}{% endif %}</textarea></div>
+                        <div><label class="text-sm font-medium">Payload (JSON)</label><p class="text-xs text-gray-500 mt-1">Placeholders are supported.</p><textarea name="failure_webhook_payload" class="p-2 border rounded w-full mt-1 font-mono text-xs" rows="4" placeholder='{ "text": "ALERT: Resource {resource_name} is down!" }' x-bind:disabled="!sendWebhook">{% if resource and resource.failure_webhook_payload %}{{ resource.failure_webhook_payload | tojson(indent=2) }}{% endif %}</textarea></div>
+                    </div>
+                </div>
+                <!-- Health-check-specific Test Values for each required param -->
+
+            </div>
+        </div>
+
+        <div class="flex justify-end items-center space-x-3 border-t pt-4 mt-3">
+            <a href="/resources" class="px-4 py-2 bg-gray-200 text-gray-800 rounded">Cancel</a>
+            <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded">{{ 'Save Changes' if resource else 'Save Resource' }}</button>
+        </div>
+    </form>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+<script>
+    const form = document.getElementById('resource-form');
+    const headersContainer = document.getElementById('headers-container');
+    const paramsContainer = document.getElementById('params-container');
+
+    function createHeaderRow(key, value) {
+        if (!key) return;
+        const row = document.createElement('div');
+        row.className = 'flex items-center gap-2';
+        row.innerHTML = `<input type="hidden" name="header_keys" value="${key}"><input type="hidden" name="header_values" value="${value || ''}"><input type="text" value="${key}" class="p-2 border rounded bg-gray-100 w-1/3" readonly><input type="text" value="${value || ''}" class="p-2 border rounded bg-gray-100 flex-grow" readonly><button type="button" class="px-3 py-2 bg-red-600 text-white rounded w-20 flex-shrink-0" onclick="this.parentElement.remove()">Remove</button>`;
+        headersContainer.appendChild(row);
+    }
+    document.getElementById('add-header-btn').addEventListener('click', () => {
+        const keyInput = document.getElementById('new-header-key');
+        const valueInput = document.getElementById('new-header-value');
+        createHeaderRow(keyInput.value.trim(), valueInput.value.trim());
+        keyInput.value = ''; valueInput.value = '';
+    });
+
+    function createParamRow(paramName) {
+        if (!paramName) return;
+        const row = document.createElement('div');
+        row.className = 'flex items-center gap-2';
+        // create a stable id to link param and test value rows
+        const uid = `param_${Math.random().toString(36).slice(2,9)}`;
+        row.dataset.uid = uid;
+        row.innerHTML = `
+            <input type="hidden" name="required_params" value="${paramName}">
+            <input type="text" value="${paramName}" class="p-2 border rounded bg-gray-100 flex-grow" readonly>
+            <button type="button" class="px-3 py-2 bg-red-600 text-white rounded w-20 flex-shrink-0" onclick="removeParamPair('${uid}', this)">Remove</button>
+        `;
+        paramsContainer.appendChild(row);
+        return uid;
+    }
+
+    function createTestValueRow(uid, paramName, testValue) {
+        const container = document.getElementById('test-values-container');
+        const row = document.createElement('div');
+        row.className = 'flex items-center gap-2';
+        row.dataset.uid = uid;
+        row.innerHTML = `
+            <input type="hidden" name="param_test_keys" value="${paramName}">
+            <input type="text" value="${paramName}" class="p-2 border rounded bg-gray-100 w-1/3" readonly>
+            <input type="text" name="param_test_values" value="${testValue || ''}" placeholder="{datetime}" class="p-2 border rounded flex-grow">
+        `;
+        container.appendChild(row);
+    }
+    document.getElementById('add-param-btn').addEventListener('click', () => {
+        const nameInput = document.getElementById('new-param-name');
+        const pname = nameInput.value.trim();
+        if (!pname) return;
+        const uid = createParamRow(pname);
+        // create linked test-value row (hidden unless HC enabled)
+        createTestValueRow(uid, pname, '');
+        nameInput.value = '';
+        // if health-check is enabled, ensure section is visible and inputs enabled/disabled correctly
+        toggleHealthTestSection();
+        updateTestValuesState();
+    });
+
+    form.addEventListener('submit', function(event) {
+        console.log('resource form submit handler invoked');
+        // Defensive DOM lookups to avoid throwing when an element is unexpectedly missing.
+        const hcToggleEl = document.getElementById('hc-toggle');
+        const hcEnabled = hcToggleEl ? hcToggleEl.checked : false;
+        // Determine selected health check method
+        const methodEl = document.querySelector('input[name=health_check_method]:checked');
+        const hcMethod = methodEl ? methodEl.value : 'simple';
+
+        // Only require individual test-values when health check is enabled AND method is 'actual'
+        if (hcEnabled && hcMethod === 'actual') {
+            let allValuesFilled = true;
+            const testInputs = document.querySelectorAll('input[name=param_test_values]') || [];
+            testInputs.forEach(input => {
+                if (!input || input.value.trim() === '') { allValuesFilled = false; }
+            });
+            if (!allValuesFilled) {
+                event.preventDefault();
+                alert('A "Health check value" is required for each parameter when Health Check method is "Actual".');
+                return;
+            }
+        }
+
+        // If email notification is enabled, ensure recipient field is present
+        const sendEmailEl = document.querySelector('input[name=send_failure_email]');
+        const sendEmailChecked = sendEmailEl ? sendEmailEl.checked : false;
+        if (sendEmailChecked) {
+            const emailInput = document.querySelector('input[name=notification_email]');
+            if (!emailInput || !emailInput.value.trim()) {
+                event.preventDefault();
+                alert('When "Send Email" is enabled, Recipient Emails are required.');
+                return;
+            }
+        }
+
+        // If webhook is enabled, ensure URL field is present
+        const sendWebhookEl = document.querySelector('input[name=send_failure_webhook]');
+        const sendWebhookChecked = sendWebhookEl ? sendWebhookEl.checked : false;
+        if (sendWebhookChecked) {
+            const urlInput = document.querySelector('input[name=failure_webhook_url]');
+            if (!urlInput || !urlInput.value.trim()) {
+                event.preventDefault();
+                alert('When "Trigger Webhook" is enabled, the Webhook URL is required.');
+                return;
+            }
+        }
+    });
+
+    // --- Pre-population logic ---
+    document.addEventListener('DOMContentLoaded', () => {
+        const existingHeaders = {% if resource and resource.headers %}{{ resource.headers | tojson | safe }}{% else %}null{% endif %};
+        if (existingHeaders) { for (const [k, v] of Object.entries(existingHeaders)) { createHeaderRow(k, v); } }
+
+        const existingParams = {% if resource and resource.required_params %}{{ resource.required_params | tojson | safe }}{% else %}null{% endif %};
+        const existingTestValues = {% if resource and resource.health_check_test_values %}{{ resource.health_check_test_values | tojson | safe }}{% else %}null{% endif %};
+        if (existingParams) {
+            existingParams.forEach(param => {
+                const uid = createParamRow(param);
+                const tv = (existingTestValues && existingTestValues[param]) ? existingTestValues[param] : '';
+                createTestValueRow(uid, param, tv);
+            });
+        }
+
+        // Show or hide the health test-values section based on HC toggle or existing data
+        toggleHealthTestSection();
+        // Ensure inputs are enabled/disabled according to selected method
+        updateTestValuesState();
+    });
+
+    // Enable/disable param test inputs depending on HC enabled + method == 'actual'
+    function updateTestValuesState() {
+        const hcEnabledEl = document.getElementById('hc-toggle');
+        const hcEnabled = hcEnabledEl ? hcEnabledEl.checked : false;
+        const methodEl = document.querySelector('input[name=health_check_method]:checked');
+        const hcMethod = methodEl ? methodEl.value : 'simple';
+        const shouldEnable = hcEnabled && hcMethod === 'actual';
+
+        // Enable/disable individual test inputs
+        const testInputs = document.querySelectorAll('input[name=param_test_values]') || [];
+        testInputs.forEach(inp => {
+            try { inp.disabled = !shouldEnable; } catch (e) { /* defensive */ }
+        });
+
+        // Show/hide the whole health-check wrapper based on toggle (we still show info for simple)
+        const section = document.getElementById('health-test-values-section');
+        if (section) {
+            section.style.display = hcEnabled ? '' : 'none';
+        }
+
+        // Show the appropriate info paragraph depending on method
+        const infoSimple = document.getElementById('hc-info-simple');
+        const infoActual = document.getElementById('hc-info-actual');
+        if (infoSimple) infoSimple.style.display = (hcEnabled && hcMethod === 'simple') ? '' : 'none';
+        if (infoActual) infoActual.style.display = (hcEnabled && hcMethod === 'actual') ? '' : 'none';
+
+        // Show/hide only the test-values container (inputs) when method == 'actual'
+        const testValuesContainer = document.getElementById('test-values-container');
+        if (testValuesContainer) {
+            testValuesContainer.style.display = (hcEnabled && hcMethod === 'actual') ? '' : 'none';
+        }
+
+        // Show/hide placeholder help only for actual method
+        const placeholders = document.getElementById('hc-placeholders');
+        if (placeholders) {
+            placeholders.style.display = (hcEnabled && hcMethod === 'actual') ? '' : 'none';
+        }
+    }
+
+    // Wire health_check_method radio buttons to re-evaluate state when changed
+    // (Attach listeners on DOMContentLoaded to avoid race with Alpine initialization)
+
+    function removeParamPair(uid, btn) {
+        try {
+            // remove param row (defensive lookup)
+            const paramsEl = document.getElementById('params-container');
+            if (paramsEl) {
+                const paramRow = paramsEl.querySelector(`div[data-uid="${uid}"]`);
+                if (paramRow) paramRow.remove();
+            }
+
+            // remove test value row (defensive lookup)
+            const testContainer = document.getElementById('test-values-container');
+            if (testContainer) {
+                const testRow = testContainer.querySelector(`div[data-uid="${uid}"]`);
+                if (testRow) testRow.remove();
+            }
+        } catch (err) {
+            console.error('Error removing param pair for uid', uid, err);
+        }
+        try { toggleHealthTestSection(); } catch (e) { console.error('toggleHealthTestSection error', e); }
+        try { updateTestValuesState(); } catch (e) { console.error('updateTestValuesState error', e); }
+    }
+
+    function toggleHealthTestSection() {
+        // Centralized update: re-evaluate all health-check UI state
+        try { updateTestValuesState(); } catch (e) { console.error('updateTestValuesState error', e); }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        // Attach radio listeners
+        const hcMethodRadios = document.querySelectorAll('input[name=health_check_method]');
+        hcMethodRadios.forEach(r => r.addEventListener('change', () => {
+            try { toggleHealthTestSection(); } catch (e) {}
+            try { updateTestValuesState(); } catch (e) {}
+        }));
+
+        // Re-evaluate visibility when HC toggle changes
+        const hcToggleEl = document.getElementById('hc-toggle');
+        if (hcToggleEl) {
+            hcToggleEl.addEventListener('change', () => {
+                try { toggleHealthTestSection(); } catch (e) {}
+                try { updateTestValuesState(); } catch (e) {}
+            });
+        }
+    });
+</script>
+{% endblock %}

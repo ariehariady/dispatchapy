@@ -4,12 +4,21 @@
         <div class="flex justify-between items-center mb-4">
             <div>
                 <h2 class="text-lg font-semibold">Health Check History for: {{ resource.name }}</h2>
-                <a href="/resources" class="text-sm text-blue-600">&larr; Back to Resources</a>
+                <div class="mt-1 text-sm text-gray-600">
+                    Method:
+                    {% if resource.health_check_method == 'actual' %}
+                        <span class="font-semibold">Actual (send configured payload)</span>
+                    {% else %}
+                        <span class="font-semibold">Simple (GET request)</span>
+                    {% endif %}
+                </div>
             </div>
-            <!-- NEW: Manual Check Button -->
-            <button data-rid="{{ resource.id }}" class="manual-check-btn px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700">
-                Run Manual Check
-            </button>
+                <!-- NEW: Manual Check Button (hidden for client sessions) -->
+                {% if not is_client %}
+                <button data-rid="{{ resource.id }}" class="manual-check-btn px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700">
+                    Run Manual Check
+                </button>
+                {% endif %}
         </div>
         <div class="overflow-x-auto">
             <table class="min-w-full text-sm">
@@ -17,6 +26,7 @@
                 <tr>
                 <th class="px-3 py-2 text-left">Timestamp (Your Local Time)</th>
                 <th class="px-3 py-2 text-left">Status</th>
+                <th class="px-3 py-2 text-left">Method</th>
                 <th class="px-3 py-2 text-left">Notif / Webhook</th>
                 <th class="px-3 py-2 text-left">Details</th>
                 </tr>
@@ -30,6 +40,13 @@
                     <span class="font-semibold text-green-600">Success</span>
                     {% else %}
                     <span class="font-semibold text-red-600">Failed</span>
+                    {% endif %}
+                </td>
+                <td class="px-3 py-2 text-sm text-gray-700">
+                    {% if log.method == 'actual' %}
+                        <span class="font-semibold">Actual</span>
+                    {% else %}
+                        <span class="font-semibold">Simple</span>
                     {% endif %}
                 </td>
                 <td class="px-3 py-2">
@@ -55,6 +72,52 @@
                     el.textContent = date.toLocaleString(undefined, options);
                     el.title = `Original time: ${utcDateString} UTC`;
                 }
+            });
+
+            // Manual health-check button handler (works for health history and dashboard buttons)
+            document.querySelectorAll('.manual-check-btn').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    // Prevent duplicate / re-entrant clicks that may cause multiple requests
+                    if (btn.dataset.running === '1') return;
+                    btn.dataset.running = '1';
+
+                    const rid = btn.getAttribute('data-rid');
+                    if (!rid) { btn.dataset.running = '0'; return; }
+                    const originalText = btn.textContent;
+                    btn.disabled = true;
+                    btn.textContent = 'Running...';
+                    try {
+                        const resp = await fetch(`/resources/${rid}/check`, {
+                            method: 'POST',
+                            credentials: 'same-origin',
+                            headers: { 'Accept': 'application/json' }
+                        });
+                        if (!resp.ok) {
+                            const txt = await resp.text();
+                            alert('Manual check failed: ' + resp.status + ' ' + txt);
+                            btn.disabled = false;
+                            btn.textContent = originalText;
+                            return;
+                        }
+                        const data = await resp.json();
+                        const message = data.success ? `Healthy (status ${data.status_code})` : `Unhealthy (status ${data.status_code})`;
+                        // insert inline notice next to button
+                        const notice = document.createElement('div');
+                        notice.className = 'mt-2 p-2 rounded text-sm';
+                        notice.style.backgroundColor = data.success ? '#d1fae5' : '#fee2e2';
+                        notice.style.color = data.success ? '#065f46' : '#991b1b';
+                        notice.textContent = message + (data.detail ? ' — ' + data.detail : '') + (data.request_id ? ' (id: ' + data.request_id + ')' : '');
+                        btn.parentElement.insertBefore(notice, btn.nextSibling);
+                        // clear running flag and reload to refresh logs/summary after a short delay
+                        btn.dataset.running = '0';
+                        setTimeout(() => { location.reload(); }, 900);
+                    } catch (err) {
+                        alert('Manual check failed: ' + err);
+                        btn.disabled = false;
+                        btn.textContent = originalText;
+                        btn.dataset.running = '0';
+                    }
+                });
             });
         });
     </script>

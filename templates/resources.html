@@ -14,7 +14,7 @@
             <th class="px-3 py-2 text-left">Endpoint</th>
             <th class="px-3 py-2 text-left">Status</th>
             <th class="px-3 py-2 text-left">Active</th>
-            <th class="px-3 py-2 text-left">Action</th>
+            <th class="px-3 py-2 text-left"></th>
             </tr>
         </thead>
         <tbody>
@@ -39,8 +39,11 @@
             <td class="px-3 py-2 whitespace-nowrap">
                 <a href="/resources/edit/{{ r.id }}" class="px-3 py-1 bg-blue-600 text-white rounded text-xs">Edit</a>
                 <a href="/resources/{{ r.id }}/history" class="ml-2 px-3 py-1 bg-gray-600 text-white rounded text-xs">Healthcheck</a>
+                <form method="post" action="/resources/duplicate/{{ r.id }}" style="display:inline;">
+                    <button onclick="return confirm('Duplicate this resource? A copy will be created.');" class="ml-2 px-3 py-1 bg-indigo-600 text-white rounded text-xs">Duplicate</button>
+                </form>
                 <form method="post" action="/resources/delete/{{ r.id }}" style="display:inline;">
-                <button onclick="return confirm('Are you sure you want to delete this resource? This action cannot be undone.');" class="ml-2 px-3 py-1 bg-red-600 text-white rounded text-xs">Delete</button>
+                    <button onclick="return confirm('Are you sure you want to delete this resource? This action cannot be undone.');" class="ml-2 px-3 py-1 bg-red-600 text-white rounded text-xs">Delete</button>
                 </form>
             </td>
             </tr>
